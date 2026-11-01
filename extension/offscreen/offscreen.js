@@ -7,7 +7,7 @@ import { startEngine } from "../engine/startup.js";
 import { openStore } from "../engine/store.js";
 import { OcrScheduler } from "../engine/scheduler.js";
 import { createTokenizer } from "../lib/tokenizer.js";
-import { rubyHtml } from "../lib/text.js";
+import { bubbleReply } from "../engine/bubble.js";
 import { findPanelBox, cropJpeg } from "../engine/panel-crop.js";
 
 configureOrt(ort);
@@ -252,12 +252,9 @@ async function findBubble({ pageId, bubbleId }) {
 }
 
 // Text, furigana and tokens of a bubble whose text is known (works while the models are still downloading).
-async function engineBubble(msg) {
-  const { bubble, error } = await findBubble(msg);
-  if (error) return { ok: false, error };
-  if (!bubble.text) return { ok: false, error: "no_text" };
-  const tokens = (await tokenizer()).tokenize(bubble.text);
-  return { ok: true, text: bubble.text, rubyHtml: rubyHtml(bubble.text, tokens), tokens };
+async function engineBubble({ pageId, bubbleId }) {
+  store ||= await openStore(indexedDB);
+  return bubbleReply(await store.getPage(pageId), bubbleId, tokenizer);
 }
 
 // JPEG (base64) of the panel around a bubble, for the Anki card.
