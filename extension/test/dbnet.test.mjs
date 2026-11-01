@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { linesFromMap } from "../engine/dbnet.js";
+import { minAreaRect } from "../engine/geometry.js";
 
 function makeMap(w, h, rects, noise = 0.1) {
   const m = new Float32Array(w * h).fill(noise);
@@ -65,4 +66,30 @@ test("a 1024x1024 map is processed quickly", () => {
   const lines = linesFromMap(m, 1024, 1024);
   assert.equal(lines.length, 20);
   assert.ok(Date.now() - t < 2000);
+});
+
+test("an L-shaped blob yields one box scored over its own pixels", () => {
+  const m = makeMap(64, 64, [[10, 10, 19, 49], [10, 40, 49, 49]]);
+  const lines = linesFromMap(m, 64, 64);
+  assert.equal(lines.length, 1);
+  assert.ok(lines[0].score >= 0.85, `score ${lines[0].score}`);
+});
+
+test("a rotated rectangle blob gives its rect grown by the unclip distance", () => {
+  const w = 64, h = 64, rw = 40, rh = 12, deg = 20;
+  const a = (deg * Math.PI) / 180, c = Math.cos(a), s = Math.sin(a);
+  const m = new Float32Array(w * h).fill(0.1);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const dx = x - 32, dy = y - 32;
+      const u = dx * c + dy * s, v = -dx * s + dy * c;
+      if (Math.abs(u) <= rw / 2 && Math.abs(v) <= rh / 2) m[y * w + x] = 0.9;
+    }
+  }
+  const lines = linesFromMap(m, w, h, { unclipRatio: 1.5 });
+  assert.equal(lines.length, 1);
+  const d = (rw * rh * 1.5) / (2 * (rw + rh));
+  const [big, small] = [...minAreaRect(lines[0].box).size].sort((p, q) => q - p);
+  assert.ok(Math.abs(big - (rw + 2 * d)) <= 1.5, `long ${big} vs ${rw + 2 * d}`);
+  assert.ok(Math.abs(small - (rh + 2 * d)) <= 1.5, `short ${small} vs ${rh + 2 * d}`);
 });
