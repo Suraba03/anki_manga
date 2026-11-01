@@ -71,9 +71,12 @@ def create_app(config: Config, engine, store, scheduler, anki, deepseek_factory:
     async def guard(request: Request, call_next):
         if request.headers.get("host") not in allowed_hosts:
             return _err(403, "bad_host")
-        origin = request.headers.get("origin", "")
-        if not origin.startswith("chrome-extension://"):
+        # Web pages always send Origin on requests that could do harm; Chrome may omit it
+        # on extension GETs made with host permission, so absent is allowed (token still gates).
+        origin = request.headers.get("origin")
+        if origin is not None and not origin.startswith("chrome-extension://"):
             return _err(403, "bad_origin")
+        origin = origin or "null"
         if request.method == "OPTIONS":
             resp = Response(status_code=204)
             resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, OPTIONS"
@@ -102,6 +105,10 @@ def create_app(config: Config, engine, store, scheduler, anki, deepseek_factory:
             config.paired = True
             save_config(config)
         return {"token": config.token}
+
+    @app.get("/auth/check", status_code=204)
+    def auth_check():
+        return Response(status_code=204)
 
     @app.put("/settings")
     def settings(body: SettingsBody):

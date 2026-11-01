@@ -50,9 +50,16 @@ def test_rejects_bad_origin(env):
     assert r.json() == {"error": "bad_origin"}
 
 
-def test_rejects_missing_origin(env):
+def test_missing_origin_allowed_but_token_still_required(env):
+    # Chrome may omit Origin on extension GETs with host permission; web pages always send one.
     env.client.headers.pop("Origin")
-    assert env.client.get("/health").status_code == 403
+    assert env.client.get("/health").status_code == 200
+    assert env.client.get("/anki/decks", headers={"X-AM-Token": "wrong"}).status_code == 401
+
+
+def test_rejects_web_page_pair(env):
+    r = env.client.post("/pair", headers={"Origin": "https://evil.example"})
+    assert r.status_code == 403
 
 
 def test_rejects_bad_host(env):
@@ -268,3 +275,8 @@ def test_cards_page_expired(env):
     r = _card(env, pid)
     assert r.status_code == 410
     assert r.json() == {"error": "page_expired"}
+
+
+def test_auth_check(env):
+    assert env.client.get("/auth/check").status_code == 204
+    assert env.client.get("/auth/check", headers={"X-AM-Token": "bad"}).status_code == 401

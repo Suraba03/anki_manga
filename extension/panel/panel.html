@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>anki_manga</title>
+  <link rel="stylesheet" href="panel.css">
+</head>
+<body>
+  <header class="top">
+    <span class="brand">anki_manga</span>
+    <span id="status" class="status" data-state="unknown">Connecting…</span>
+  </header>
+
+  <div id="banner" class="banner" hidden></div>
+
+  <section class="site">
+    <span id="site-name" class="site-name">—</span>
+    <button id="site-toggle" class="btn" type="button" disabled>Enable on this site</button>
+  </section>
+  <div id="host-requests"></div>
+
+  <main id="entries">
+    <p id="empty" class="empty">Shift-hover a bubble for Yomitan. <b>Click</b> a bubble (or press <kbd>Alt</kbd>+<kbd>E</kbd> over it) to explain it here.</p>
+  </main>
+
+  <details id="settings" class="settings">
+    <summary>Settings</summary>
+    <label class="field">DeepSeek API key
+      <span class="row">
+        <input id="api-key" type="password" autocomplete="off" placeholder="sk-…">
+        <button id="save-key" class="btn" type="button">Save</button>
+      </span>
+      <span id="key-state" class="hint"></span>
+    </label>
+    <label class="field">Deck for this site
+      <select id="deck"></select>
+      <span id="deck-state" class="hint"></span>
+    </label>
+    <p class="hint">Show the hidden text layer on a page: <kbd>Alt</kbd>+<kbd>V</kbd>.</p>
+  </details>
+
+  <template id="entry-tpl">
+    <article class="entry">
+      <h5>Bubble</h5>
+      <div class="jp"></div>
+      <div class="tr"></div>
+      <div class="explain">
+        <h5>Why it's written this way</h5>
+        <div class="notes"></div>
+        <h5>Worth a card</h5>
+        <div class="cards"></div>
+      </div>
+      <div class="msg" hidden></div>
+    </article>
+  </template>
+
+  <script type="module" src="panel.js"></script>
+</body>
+</html>
