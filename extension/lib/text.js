@@ -5,7 +5,7 @@ import { kataToHira } from "./tokenizer.js";
 const KANJI = /[㐀-鿿々〆豈-﫿]/;
 
 const ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#x27;" };
-const escapeHtml = (s) => s.replace(/[&<>"']/g, (c) => ESCAPES[c]);
+export const escapeHtml = (s) => s.replace(/[&<>"']/g, (c) => ESCAPES[c]);
 
 // Strip the kana shared at the start/end of surface and reading; ruby only the core.
 function splitOkurigana(surface, reading) {
