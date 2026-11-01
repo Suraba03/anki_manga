@@ -46,6 +46,7 @@ const CSS = `.card { font-family: "Hiragino Sans", "Noto Sans JP", sans-serif; f
 const BATCH = 500;
 const DEFAULT_URL = "http://127.0.0.1:8765";
 const DEFAULT_TIMEOUT_MS = 15000;
+const DEFAULT_PERMISSION_TIMEOUT_MS = 120000; // Anki waits for the user to answer a dialog
 const ORIGIN_REFUSED = /origin|permission|forbidden/i;
 
 // kind: anki_unreachable | anki_origin_blocked | duplicate | anki_error
@@ -57,18 +58,19 @@ export class AnkiError extends Error {
 }
 
 export class AnkiClient {
-  constructor(fetch, url = DEFAULT_URL, { timeoutMs = DEFAULT_TIMEOUT_MS, apiKey = "" } = {}) {
+  constructor(fetch, url = DEFAULT_URL, { timeoutMs = DEFAULT_TIMEOUT_MS, permissionTimeoutMs = DEFAULT_PERMISSION_TIMEOUT_MS, apiKey = "" } = {}) {
     this._fetch = fetch;
     this._url = url;
     this._timeoutMs = timeoutMs;
+    this._permissionTimeoutMs = permissionTimeoutMs;
     this._apiKey = apiKey;
   }
 
-  async _call(action, params = {}) {
+  async _call(action, params = {}, timeoutMs = this._timeoutMs) {
     const request = { action, version: 6, params };
     if (this._apiKey) request.key = this._apiKey;
     const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), this._timeoutMs);
+    const timer = setTimeout(() => ctl.abort(), timeoutMs);
     let status;
     let data;
     try {
@@ -98,7 +100,7 @@ export class AnkiClient {
 
   // Asks Anki (a dialog on first use) to allow this extension's origin. -> {permission, requireApikey?, version?}
   requestPermission() {
-    return this._call("requestPermission");
+    return this._call("requestPermission", {}, this._permissionTimeoutMs);
   }
 
   async deckNames() {

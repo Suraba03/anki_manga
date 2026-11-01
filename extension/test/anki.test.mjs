@@ -166,3 +166,22 @@ test("apiKey is sent as key only when set", async () => {
   await without.c.deckNames();
   assert.ok(!("key" in without.sent[0].body));
 });
+
+test("requestPermission is not cut off at the normal timeout but is at its own", async () => {
+  const slowGrant = (delayMs) => (url, init) =>
+    new Promise((resolve, reject) => {
+      const t = setTimeout(() => resolve(json(ok({ permission: "granted" }))), delayMs);
+      init.signal.addEventListener("abort", () => {
+        clearTimeout(t);
+        reject(new DOMException("aborted", "AbortError"));
+      });
+    });
+  // answered after 60 ms: past timeoutMs (20) but within permissionTimeoutMs (200)
+  const patient = new AnkiClient(slowGrant(60), undefined, { timeoutMs: 20, permissionTimeoutMs: 200 });
+  assert.deepEqual(await patient.requestPermission(), { permission: "granted" });
+  // the same delay on a normal call is cut off
+  await rejects(new AnkiClient(slowGrant(60), undefined, { timeoutMs: 20, permissionTimeoutMs: 200 }).deckNames(), "anki_unreachable");
+  // never answered: aborted at the permission timeout
+  const hang = (url, init) => new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))));
+  await rejects(new AnkiClient(hang, undefined, { timeoutMs: 20, permissionTimeoutMs: 50 }).requestPermission(), "anki_unreachable");
+});
