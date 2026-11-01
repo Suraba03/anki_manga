@@ -6,8 +6,8 @@
   const { PageFinder, Overlay, Status } = globalThis.AnkiManga;
 
   // After the extension is reloaded, the copy that was running in this tab is cut off from it
-  // (its layers stay in the DOM but can't reach the helper). Drop those layers; this copy
-  // re-creates them from the helper's cache.
+  // (its layers stay in the DOM but can't reach the extension). Drop those layers; this copy
+  // re-creates them from the engine's cache.
   document.querySelectorAll(".am-layer, .am-badge").forEach((n) => n.remove());
 
   const RETRY_DELAYS = [2000, 4000, 8000];

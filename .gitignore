@@ -17,9 +17,8 @@ __pycache__/
 .env
 
 # Build/dev
-helper/.venv/
+dist/
 extension/node_modules/
-.pytest_cache/
 
 # development notes (specs, plans): kept local
 docs/superpowers/

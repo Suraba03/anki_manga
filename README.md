@@ -1,185 +1,102 @@
-# anki_manga
-
-**English** · [Русский](README.ru.md)
+# Manga OCR & Mining for Anki
 
 Read Japanese manga in Chrome and turn speech bubbles into Anki cards with almost no friction.
 
 <!-- GIF: hover a bubble with Yomitan, click it, add a card from the panel -->
 
-- **Hover** any speech bubble with [Yomitan](https://yomitan.wiki/) (hold Shift). The bubble's text is OCR'd on your computer and laid invisibly over the image, so Yomitan works on manga pages, and the card's sentence is exactly that bubble.
-- **Click** a bubble to open the side panel. It shows the line with furigana, a translation, a short explanation of *why it's written that way*, and the words worth learning.
+- **Hover** any speech bubble with [Yomitan](https://yomitan.wiki/) (hold Shift). The bubble's text is read in your browser and laid invisibly over the image, so Yomitan works on manga pages, and the card's sentence is exactly that bubble.
+- **Click** a bubble to open the side panel. It shows the line with furigana, a dictionary entry for any word you click, a translation, a short explanation of *why it's written that way*, and the words worth learning.
 - **"+"** adds a rich card to Anki: the word, its reading and meaning, the bubble sentence with the word in bold, furigana, translation, grammar notes, a picture of the comic panel, and a link back to the page. Words already in your deck are greyed out.
 
-OCR runs locally ([manga-ocr](https://github.com/kha-white/manga-ocr) and comic-text-detector, through [mokuro](https://github.com/kha-white/mokuro)). Explanations use **your own** DeepSeek API key. Only the text of the bubbles you click is sent, and every answer is cached, so the same bubble is never paid for twice.
+Everything runs inside the extension. There is nothing else to install: no helper program, no Python, no Terminal. Text recognition (OCR) is done on your computer with [manga-ocr](https://github.com/kha-white/manga-ocr) and comic-text-detector, **page images never leave your device**, and only the text of a bubble you click is sent out, to get an explanation.
 
 ---
 
 ## Contents
 
-1. [How it works](#how-it-works)
-2. [What you need](#what-you-need)
-3. [Installation, step by step](#installation-step-by-step)
-4. [First chapter](#first-chapter)
-5. [Everyday use](#everyday-use)
-6. [Optional extras](#optional-extras)
-7. [Updating and uninstalling](#updating-and-uninstalling)
-8. [Troubleshooting](#troubleshooting)
-9. [Privacy and costs](#privacy-and-costs)
-10. [Development](#development)
-11. [License](#license)
-
----
-
-## How it works
-
-There are two parts, and both have to be running while you read:
-
-| Part | What it is | What it does |
-|---|---|---|
-| **Helper** | A small program you start in Terminal (`anki-manga-helper`). It stays on your computer and listens only on `127.0.0.1`. | Finds the speech bubbles, reads their text (OCR), caches the results, talks to DeepSeek and Anki. |
-| **Extension** | A Chrome extension with a side panel. | Sends manga pages to the helper, places the invisible text layer for Yomitan, and shows explanations and "+" buttons. |
-
-Anki (with AnkiConnect) must be open to add cards. Yomitan is optional: without it you can still click bubbles for explanations and cards.
+1. [What you need](#what-you-need)
+2. [Install](#install)
+3. [Anki and AnkiConnect](#anki-and-ankiconnect)
+4. [First run](#first-run)
+5. [Reading and mining](#reading-and-mining)
+6. [Explanations: free tier or your own key](#explanations-free-tier-or-your-own-key)
+7. [Dictionary](#dictionary)
+8. [Status badges](#status-badges)
+9. [Yomitan (optional)](#yomitan-optional)
+10. [Troubleshooting](#troubleshooting)
+11. [Privacy](#privacy)
+12. [Development](#development)
+13. [Licences](#licences)
 
 ---
 
 ## What you need
 
-- **macOS.** Apple Silicon (M1 or newer) is fastest. Intel Macs, Linux and Windows may work but are untested.
-- **Google Chrome** 116 or newer. Other Chromium browsers may work.
-- About **3 GB of free disk space** for the OCR models and PyTorch.
-- **[Anki](https://apps.ankiweb.net/)** (desktop) with the **AnkiConnect** add-on.
-- A **DeepSeek API key** with a little balance, for explanations. A few dollars lasts a very long time ([costs](#privacy-and-costs)).
-- **[uv](https://docs.astral.sh/uv/)**, which installs the helper and its own Python for you. You don't need to install Python yourself.
+- **Google Chrome** 116 or newer (other Chromium browsers may work). A GPU with WebGPU makes text recognition faster; without it the extension falls back to the CPU automatically.
+- About **400 MB of disk space** for the models and the dictionary, downloaded once on first run.
+- **[Anki](https://apps.ankiweb.net/)** (desktop) with the **AnkiConnect** add-on, to add cards.
+- Optional: [Yomitan](https://yomitan.wiki/), if you want its popup dictionary on manga pages.
+- Optional: an API key from [DeepSeek](https://platform.deepseek.com/) or another OpenAI-compatible provider, if you don't want to use the free explanations.
 
 ---
 
-## Installation, step by step
+## Install
 
-Plan for 15–20 minutes, most of it waiting for downloads. You do this once.
+Install **Manga OCR & Mining for Anki** from the Chrome Web Store, then click the puzzle-piece icon in the toolbar and **pin** it so its icon is always visible.
 
-### Step 1. Install uv
+> The Store listing is not published yet. Until then, load the extension from source (see [Development](#development)): download the repository, open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and choose the `extension` folder.
 
-Open **Terminal** (⌘ Space, type "Terminal", press Enter) and paste:
+---
 
-```sh
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-If you use Homebrew, `brew install uv` works too.
-
-**Close Terminal and open it again**, then check:
-
-```sh
-uv --version
-```
-
-You should see something like `uv 0.x.y`. If you see `command not found`, open a new Terminal window and try again.
-
-### Step 2. Install the helper
-
-```sh
-uv tool install "git+https://github.com/Suraba03/anki_manga#subdirectory=helper"
-```
-
-This downloads the helper and its dependencies (PyTorch is the big one), which takes a few minutes. It ends with `Installed 1 executable: anki-manga-helper`.
-
-If uv warns that `~/.local/bin` is not on your PATH, run `uv tool update-shell`, then close and reopen Terminal.
-
-### Step 3. Start the helper (first start downloads models)
-
-```sh
-anki-manga-helper
-```
-
-On the **first start** it downloads the OCR models (about 500 MB), which can take a few minutes. When it is done it prints:
-
-```
-ready
-```
-
-Every later start takes a few seconds. **Leave this Terminal window open while you read.** Closing it stops the helper. To stop it on purpose, press `Ctrl+C`. To have it start by itself at login, see [Start the helper automatically](#start-the-helper-automatically).
-
-### Step 4. Install Anki and AnkiConnect
+## Anki and AnkiConnect
 
 1. Install [Anki](https://apps.ankiweb.net/) if you don't have it, and open it.
 2. In Anki: **Tools → Add-ons → Get Add-ons…**, enter the code **`2055492159`**, and click OK.
 3. **Restart Anki.**
 
-AnkiConnect has nothing to configure. Anki just needs to be open when you add cards.
+Anki just needs to be open when you add cards. Reading and explanations work without it.
 
-### Step 5. Install the Chrome extension
+The first time the extension talks to Anki, Anki shows a permission prompt ("allow this extension to use AnkiConnect"). Accept it. If you decline, the panel tells you what to do (accept the prompt, or add the extension's origin to `webCorsOriginList` in AnkiConnect's config). The extension talks to AnkiConnect only on `127.0.0.1`.
 
-The extension isn't on the Chrome Web Store, so you load it from a folder:
-
-1. Download this repository. On GitHub, click the green **Code** button, then **Download ZIP**. Unzip it somewhere permanent, such as `~/Applications/anki_manga`. (Or run `git clone https://github.com/Suraba03/anki_manga.git`.)
-   > ⚠️ Chrome loads the extension from that folder every time. Don't delete or move it after loading.
-2. In Chrome, open **`chrome://extensions`**.
-3. Turn on **Developer mode** (the switch in the top-right corner).
-4. Click **Load unpacked** and choose the **`extension`** folder inside the downloaded repository. Choose `extension`, not the whole repository.
-5. Click the puzzle-piece icon in the Chrome toolbar and **pin** anki_manga, so its icon is always visible.
-
-### Step 6. Connect the extension and add your DeepSeek key
-
-1. Get a key. Sign up at [platform.deepseek.com](https://platform.deepseek.com/), top up a small balance under **Top up**, then open **API keys → Create new API key** and copy it (it starts with `sk-`).
-2. Click the **anki_manga icon** in the toolbar. The side panel opens on the right.
-3. The status in the top-right corner should say **● Helper ready** in green. If it doesn't, see [Troubleshooting](#troubleshooting).
-4. **⚙ Settings — API key & deck** opens by itself the first time. Paste your key and click **Save**. You should see **Key saved.**
-5. Pick the **deck** new cards should go to. The list comes from Anki, so Anki must be open.
-
-At this point anki_manga has created a note type called **Manga Mining (anki_manga)** in Anki. You don't need to set it up.
-
-Your key is stored only by the helper on your computer. It's never saved in the extension or sent anywhere except DeepSeek.
-
-### Step 7. Install Yomitan (recommended)
-
-1. Install [Yomitan from the Chrome Web Store](https://chromewebstore.google.com/detail/yomitan/likgccmbimhjbgkjambclfkhldnlhbnn).
-2. On its welcome page, import a dictionary. [Jitendex](https://jitendex.org/) is a good Japanese–English one.
-3. Yomitan looks words up when you **hold Shift and move the mouse** over text. That's its default, and anki_manga relies on it.
-4. Optional: set up Yomitan's Anki tab so its own "+" creates cards. See [Make Yomitan use the same note type](#make-yomitan-use-the-same-note-type).
-
-You're done with installation.
+The extension creates a note type called **Manga Mining (anki_manga)** in Anki by itself. You don't need to set it up.
 
 ---
 
-## First chapter
+## First run
 
-1. Open a chapter on your manga reader site. Long-strip "scroll" readers and one-page-at-a-time readers both work.
-2. Open the side panel (anki_manga icon) and click **Enable on this site**. Chrome asks for access to **that site only**. Click **Allow**.
-3. Many sites load images from a separate image server. If the panel then shows a button like **Allow images from cdn.example.com**, click it once and allow.
-4. Watch the **badge in the top-right corner of each page**:
-   - `⏳ finding bubbles…`: the helper is looking for speech bubbles.
-   - `⏳ 4/11`: 4 of the 11 bubbles have been read so far.
-   - `✓ 11`: all done. The badge fades out after a moment.
-   - `⚠ …`: something is wrong, and the text says what. It stays until the problem is fixed.
+1. Click the extension icon. The side panel opens on the right.
+2. The status in the top-right corner of the panel goes `Downloading models… N%`, then `Loading models…`, then `Ready (WebGPU)` or `Ready (CPU)`. The first download takes a few minutes (about 350 MB with WebGPU, about 200 MB on the CPU, plus the 11 MB dictionary); later starts take a few seconds. Every file is checked against a SHA-256 hash, and what is downloaded is data only, never code.
+3. Open **Settings** in the panel and pick the **Anki deck** new cards should go to. Anki must be open for the list to load. Click **Connect to Anki** if the panel asks, and accept the prompt in Anki.
+4. Open a chapter on your manga reader site and click **Enable on this site** in the panel. Chrome asks for access to **that site only**. Click **Allow**.
+5. Many sites load images from a separate image server. If the panel then shows a button like **Allow images from cdn.example.com**, click it once and allow.
 
-   The panel shows a summary for the tab, for example `Pages: 6 ready · 1 recognizing`.
-5. **Hold Shift and hover** a word in a bubble: the Yomitan popup appears.
-6. **Click** a bubble (without Shift). The panel shows:
+You can sit through the model download while you read: bubbles are processed as soon as the models are ready.
+
+---
+
+## Reading and mining
+
+1. Scroll through the chapter. Pages are processed shortly before they scroll into view, so usually the bubbles are ready by the time you get there. Long-strip "scroll" readers and one-page-at-a-time readers both work. If you hover a bubble that isn't read yet (it has a dashed outline), it jumps to the front of the queue.
+2. **Hold Shift and hover** a word in a bubble to get the Yomitan popup (if you installed Yomitan).
+3. **Click** a bubble (without Shift). The panel shows:
    - the sentence **with furigana** (instant)
    - a **translation** and **grammar notes** explaining why it's said that way (a second or two)
    - **suggested words**, each with a **+** button
-7. Click **+** next to a word: a card appears in your deck and the row shows `✓ added`.
-
-Pages are processed shortly before they scroll into view, so usually the bubbles are ready by the time you get there. If you hover a bubble that isn't read yet (it has a dashed outline), it jumps to the front of the queue.
-
----
-
-## Everyday use
-
-1. Open Anki.
-2. Start the helper: `anki-manga-helper` in Terminal (or let it [start automatically](#start-the-helper-automatically)).
-3. Read in Chrome. Sites you enabled stay enabled.
+4. **Click a word** in the sentence to see its dictionary entry.
+5. Click **+** next to a word: a card appears in your deck and the row shows `✓ added`.
 
 | Action | How |
 |---|---|
-| Look up a word | Hold **Shift** and hover it (Yomitan) |
+| Look up a word with Yomitan | Hold **Shift** and hover it |
 | Explain a bubble | **Click** it, or hover it and press **Alt+E** |
+| Dictionary entry of a word | Click the word in the panel's sentence |
 | Add a card | **+** next to a suggested word in the panel |
 | Show or hide the hidden text layer (to check alignment) | **Alt+V** |
 | Stop using it on a site | Panel → **Disable on this site** |
 
 Readers that draw pages on a `<canvas>` instead of using images also work, through a screenshot fallback. The page has to be fully on screen, and Chrome asks once for permission to take screenshots.
+
+**Settings → Text recognition** chooses between *Auto*, *Prefetch* (read every bubble in advance) and *On demand* (read a bubble when you hover it). *Auto* is fine for most people.
 
 ### What's on a card
 
@@ -201,36 +118,51 @@ Cards are tagged `anki_manga`. You can restyle the card template in Anki (**Tool
 
 ---
 
-## Optional extras
+## Explanations: free tier or your own key
 
-### Start the helper automatically
+Choose in **Settings → Explanations**.
 
-So that you never need Terminal again, make macOS start the helper at login and restart it if it stops. Paste this into Terminal once:
+- **Free.** No account and no key. Up to 100 explanations per install per day (the panel shows how many are left today), paid for by the project owner within a monthly budget. When the day's limit or the month's budget runs out, the panel says so and offers to switch to your own key. Identical bubble texts are answered from a shared cache, so they don't count twice. Free mode works in the published build; a build you load from source may not have the server address and will offer your own key instead.
+- **Use my own API key.** Pick **DeepSeek** or **Custom (OpenAI-compatible)** (with a base URL; Chrome asks for permission to talk to that host once). Paste your key and, optionally, a model name (the default is `deepseek-flash`). The text of the bubble you click goes straight from your browser to your provider. Your key stays in the extension's storage on your device.
+  - DeepSeek: sign up at [platform.deepseek.com](https://platform.deepseek.com/), top up a small balance, then **API keys → Create new API key** (it starts with `sk-`). One explanation is a few hundred tokens, a tiny fraction of a cent; see [DeepSeek pricing](https://api-docs.deepseek.com/quick_start/pricing).
 
-```sh
-mkdir -p ~/Library/LaunchAgents
-cat > ~/Library/LaunchAgents/com.anki-manga.helper.plist <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>com.anki-manga.helper</string>
-  <key>ProgramArguments</key><array><string>$HOME/.local/bin/anki-manga-helper</string></array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>$HOME/Library/Logs/anki-manga-helper.log</string>
-  <key>StandardErrorPath</key><string>$HOME/Library/Logs/anki-manga-helper.log</string>
-</dict>
-</plist>
-EOF
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.anki-manga.helper.plist
-```
+Every answer is cached on your device, so clicking the same bubble again costs nothing and doesn't count against the free limit.
 
-- Check that it runs: `tail ~/Library/Logs/anki-manga-helper.log` should end with `ready`.
-- Restart it (for example after an update): `launchctl kickstart -k gui/$(id -u)/com.anki-manga.helper`
-- Turn it off: `launchctl bootout gui/$(id -u)/com.anki-manga.helper && rm ~/Library/LaunchAgents/com.anki-manga.helper.plist`
+---
 
-If `which anki-manga-helper` prints a path other than `~/.local/bin/anki-manga-helper`, put that path in the file instead.
+## Dictionary
+
+The panel has an offline dictionary based on [JMdict](https://www.edrdg.org/jmdict/j_jmdict.html) (English glosses). It is downloaded together with the models and runs on your device. Click a word in the panel's sentence to see readings, parts of speech and meanings. Words are split with kuromoji. The dictionary is independent of Yomitan, which keeps working with its own dictionaries.
+
+---
+
+## Status badges
+
+A small badge sits in the top-right corner of each page image:
+
+| Badge | Meaning |
+|---|---|
+| `⏳ finding bubbles…` | the page is being scanned for speech bubbles |
+| `⏳ 4/11` | 4 of the 11 bubbles have been read so far |
+| `✓ 11` | all done (the badge fades out after a moment) |
+| `✓ no text` | the page has no text bubbles |
+| `⏳ downloading models…` / `⏳ loading models…` | the models aren't ready yet; the page continues by itself |
+| `⚠ allow images in the side panel` | click **Allow images from …** in the panel |
+| `⚠ can't load this image` | the site blocks direct image downloads; the extension falls back to screenshots, so allow screenshots if asked |
+| `⚠ allow screenshots in the side panel` | the screenshot fallback needs permission |
+| `⚠ can't read this image` | the image is in a format the browser can't decode |
+| `⚠ recognition failed — see the side panel` | the engine hit an error; the panel says more |
+| `⚠ extension reloaded — refresh the page` | reload the tab (⌘R / Ctrl+R) |
+
+The panel shows a summary for the tab, for example `Pages: 6 ready · 1 recognizing`. The top of the panel shows the model status: `Ready (WebGPU)`, `Ready (CPU)`, a download progress, or a red message with a **Retry** button.
+
+---
+
+## Yomitan (optional)
+
+1. Install [Yomitan from the Chrome Web Store](https://chromewebstore.google.com/detail/yomitan/likgccmbimhjbgkjambclfkhldnlhbnn).
+2. On its welcome page, import a dictionary. [Jitendex](https://jitendex.org/) is a good Japanese–English one.
+3. Yomitan looks words up when you **hold Shift and move the mouse** over text. That's its default, and the extension relies on it.
 
 ### Make Yomitan use the same note type
 
@@ -251,91 +183,96 @@ Leave the other fields empty. The panel fills them when you add from there. Beca
 
 ---
 
-## Updating and uninstalling
-
-**Update:**
-
-```sh
-uv tool upgrade anki-manga-helper
-```
-
-Then restart the helper. For the extension, download the repository again into the **same folder** (or `git pull` there). Then go to `chrome://extensions`, click **↻** on anki_manga, and reload your manga tabs.
-
-**Uninstall:**
-
-```sh
-uv tool uninstall anki-manga-helper
-rm -rf ~/Library/Application\ Support/anki_manga ~/Library/Caches/anki_manga
-```
-
-Then remove the extension in `chrome://extensions`. If you set up autostart, turn it off first (see above). The OCR models are in `~/.cache/huggingface` and `~/.cache/manga-ocr` if you want that space back. Your Anki cards stay.
-
----
-
 ## Troubleshooting
 
 **First, the three usual causes:**
-1. Is the helper running? Its Terminal window should say `ready`.
+1. Does the panel say `Ready (…)` at the top? If it is still downloading or loading, wait.
 2. Is Anki open? It's only needed for decks and cards.
 3. Did you reload the manga tab after enabling the site or updating the extension?
 
 | You see | What to do |
 |---|---|
-| Panel: **● Helper not running** / badge `⚠ helper not running` | Start `anki-manga-helper` in Terminal. Pages retry by themselves. |
-| Panel: **Loading OCR models…** / badge `⏳ helper starting…` | Wait. It takes 3–10 s, or a few minutes on the very first start. |
-| Panel: **● Model loading failed** | Look at the helper's Terminal window for the error. Usually the first model download was interrupted: stop the helper (`Ctrl+C`) and start it again. |
-| **This helper is paired with another install** | This happens after you reinstall the extension. Run `anki-manga-helper --reset-pairing`, restart the helper, and reopen the panel. |
-| Badge `⚠ not paired — open the side panel` | Open the side panel once. It pairs automatically. |
+| `Downloading models… N%` / badge `⏳ downloading models…` | Wait. It takes a few minutes the first time and happens once. |
+| `Model download failed — check your connection.` | Check your connection and click **Retry**. |
+| `A downloaded model file failed its check.` | Click **Retry**. If it keeps failing, use Settings → **Delete downloaded models and caches**, then **Download again**. |
+| `The OCR engine failed to start.` | Click **Retry**. Open an issue if it persists (include your Chrome version). |
 | Button **Allow images from …** / badge `⚠ allow images in the side panel` | Click the button in the panel and allow. |
-| Badge `⚠ extension reloaded — refresh the page` | Reload the tab (⌘R). |
-| Badge `⚠ can't load this image` | The site blocks direct image downloads. The extension falls back to screenshots, so allow screenshots if asked. |
-| No badges, nothing happens | Check that the panel says **Disable on this site** (that means it's enabled). Reload the tab. If it's still empty, open the panel and look at the `Pages:` line. |
+| Badge `⚠ extension reloaded — refresh the page` | Reload the tab. |
+| Badge `⚠ can't load this image` | The site blocks direct image downloads. Allow screenshots if asked. |
+| No badges, nothing happens | Check that the panel says **Disable on this site** (that means it's enabled). Reload the tab. If it's still empty, look at the `Pages:` line. |
 | Yomitan doesn't pop up | Hold **Shift** while hovering. Check that Yomitan is enabled and has a dictionary. Press **Alt+V**: if no red text appears, the page isn't processed yet (see the badge). |
-| The red text (Alt+V) is offset from the bubbles | Resize the window slightly. If it persists, open an issue with the site's name and a screenshot. |
+| The red text (Alt+V) is offset from the bubbles | Resize the window slightly. If it persists, open an issue with a screenshot. |
 | **Anki isn't running…** | Open Anki. Explanations still work, but cards can't be added until Anki is open. |
+| **Anki refused this extension…** | Accept the AnkiConnect permission prompt in Anki, or add the extension's origin to `webCorsOriginList` in AnkiConnect's config and restart Anki. |
+| **Today's free explanations are used up…** | They reset tomorrow (UTC). Or add your own API key in Settings. |
+| **The free explanation service is unavailable…** | Try again later or add your own API key. |
 | **Add your DeepSeek API key in Settings…** | Settings → paste key → Save. |
 | **DeepSeek rejected the API key** | Check the key on platform.deepseek.com, or create a new one. |
 | **Your DeepSeek account has no balance** | Top up on platform.deepseek.com. |
-| `command not found: anki-manga-helper` | Run `uv tool update-shell`, then reopen Terminal. |
+| **The dictionary could not be loaded…** | Check your connection and click the word again. |
 
-**Where things live** (macOS):
-- Settings and the API key: `~/Library/Application Support/anki_manga/config.json`, readable only by your user.
-- Cache (OCR results, explanations, the last 300 page images): `~/Library/Caches/anki_manga/`. Deleting it is safe.
-- Set `ANKI_MANGA_HOME=/some/folder` to keep both there instead.
+Settings, the list of enabled sites and caches live in the browser. Settings → **Delete downloaded models and caches** clears the models and caches. Removing the extension removes everything. Your Anki cards stay.
 
-Still stuck? [Open an issue](https://github.com/Suraba03/anki_manga/issues) with what the panel and the helper's Terminal window say.
+Still stuck? [Open an issue](https://github.com/Suraba03/anki_manga/issues) with what the panel says.
 
 ---
 
-## Privacy and costs
+## Privacy
 
-- **Page images never leave your computer.** They go only to the helper on `127.0.0.1`, which refuses requests from web pages, accepts only this extension (paired with a secret token), and listens only locally.
-- **DeepSeek receives only the text of a bubble you click**, once. The answer is cached, and clicking the same bubble again costs nothing.
-- **Your API key** is stored only in the helper's local config file (mode 0600). It's never in the extension, in Chrome sync, or in this repository.
-- **Cost:** one explanation is a few hundred tokens, a tiny fraction of a cent with `deepseek-chat`. A whole chapter where you click every bubble usually costs less than a cent. See [DeepSeek pricing](https://api-docs.deepseek.com/quick_start/pricing).
+Full text: [docs/privacy.md](docs/privacy.md) (published at <https://suraba03.github.io/anki_manga/privacy>).
+
+- **Page images never leave your device.** Detection and OCR run in the browser.
+- **Only the text of a bubble you click is sent**, and only to get an explanation: to the project's free server (random install ID, no account), or straight to your own provider if you use your own key.
+- The free server stores a shared cache of explanations (bubble text and answer) and counters for the limits (per install ID, per salted hash of the address, per month). No page images, no URLs, no analytics, no tracking.
+- AnkiConnect is contacted only on `127.0.0.1`. Settings and keys stay in the browser on your device.
 
 ---
 
 ## Development
 
+The extension is plain ES modules and classic content scripts, with no build step. `extension/` is exactly what ships.
+
 ```sh
-cd helper && uv sync --extra dev && uv run pytest -m "not models"   # fast tests
-ANKI_MANGA_SAMPLES=/path/to/pages uv run pytest -m models             # real-model tests
-uv run anki-manga-helper                                              # run from source
-cd extension && node --test                                           # extension logic
+cd extension && npm ci && node --test     # extension tests (dev dependencies only: fake-indexeddb, kuromoji, onnxruntime-node, jpeg-js)
+cd server && node --test                  # free-tier Worker tests (no install needed)
 ```
 
-- After editing extension files: `chrome://extensions` → ↻ → reload the tab.
-- Manual browser checks: [`extension/test/manual-checklist.md`](extension/test/manual-checklist.md).
+- **Load from source:** `chrome://extensions` → Developer mode → **Load unpacked** → the `extension` folder. After editing files: ↻ on the extension, then reload the tab.
+- **Manual browser checks:** [`extension/test/manual-checklist.md`](extension/test/manual-checklist.md).
+- **Model tests** are skipped unless these are set:
+  - `ANKI_MANGA_SAMPLES`: folder with `*.jpg` sample pages and `reference/*.json` (made by `tools/make-reference.py`, which needs a Python env with the v1 helper from git history, see its docstring). Your own pages; never commit them.
+  - `ANKI_MANGA_MODELS`: folder with the model files (default `tools/.cache/models`).
+  - `ANKI_MANGA_MODEL_SET=webgpu`: test the fp16 encoder and fp32 decoder instead of the q4 CPU set.
+- **End to end:** `ANKI_MANGA_SAMPLES=/path/to/pages node tools/e2e/run.mjs --smoke` launches Chrome for Testing with the unpacked extension, serves the sample pages and the mirrored models from `127.0.0.1:47900`, and waits for the text layer. `--probe` checks the platform (offscreen document, WebGPU, cross-origin fetch). Anki is faked on port 8766; the real AnkiConnect on 8765 is never touched.
+- **Models and dictionary:**
+  - `node tools/mirror-models.mjs` downloads the model files at pinned Hugging Face revisions, hashes them into `tools/.cache/mirror/` and writes `extension/engine/models.manifest.json` (URLs on the GitHub release `models-1`). `--upload` also creates the release: that publishes, so it needs the owner.
+  - `node tools/build-dict.mjs` builds the dictionary from [jmdict-simplified](https://github.com/scriptin/jmdict-simplified) and records it in the same manifest.
+- **Free-tier server** (`server/`, Cloudflare Worker with D1):
+  1. `cd server && npm install`
+  2. `npx wrangler d1 create anki-manga`, paste the printed id into `wrangler.toml`, then `npx wrangler d1 execute anki-manga --remote --file schema.sql`
+  3. `npx wrangler secret put DEEPSEEK_API_KEY` and `npx wrangler secret put IP_SALT`
+  4. Check the price and model variables in `wrangler.toml`, then `npm run deploy`
+  5. Put the Worker's URL in `FREE_URL` in `extension/lib/llm.js` and the extension's Store ID in `ALLOWED_ORIGINS`.
+
+  `npm run dev` runs it locally. Deploying is the owner's step.
+- **Store package:** `node tools/package.mjs` writes `dist/manga-mining-<version>.zip` (the `extension/` folder without `test/`, `node_modules/` and `package*.json`). `--out <dir>` changes the folder.
 
 **Roadmap:**
 - **v2:** explanations adapted to your level, and follow-up questions about a bubble.
 - **v3:** "make this chapter a lesson", with prep before reading and a recap after.
 - **v4:** suggestions based on words you look up repeatedly.
-- **Later:** standalone dictionary popups without Yomitan.
 
 ---
 
-## License
+## Licences
 
-GPL-3.0-or-later. Built on [mokuro](https://github.com/kha-white/mokuro) (GPL-3.0), [manga-ocr](https://github.com/kha-white/manga-ocr) (Apache-2.0) and [comic-text-detector](https://github.com/dmMaze/comic-text-detector). Model weights are downloaded at runtime.
+GPL-3.0-or-later (see [LICENSE](LICENSE)). Built on:
+
+- [comic-text-detector](https://github.com/dmMaze/comic-text-detector) (GPL-3.0), the bubble and text detector, run as an ONNX model
+- [manga-ocr](https://github.com/kha-white/manga-ocr) (Apache-2.0), the text recognition model, run as an ONNX model
+- [mokuro](https://github.com/kha-white/mokuro) (GPL-3.0), whose pipeline the first version of this project was built on
+- [JMdict](https://www.edrdg.org/edrdg/licence.html) by the Electronic Dictionary Research and Development Group (CC BY-SA 4.0), through [jmdict-simplified](https://github.com/scriptin/jmdict-simplified)
+- [kuromoji](https://github.com/takuyaa/kuromoji.js) (Apache-2.0), word splitting
+- [ONNX Runtime Web](https://github.com/microsoft/onnxruntime) (MIT), the inference engine
+
+Model weights and the dictionary are data downloaded at runtime from pinned URLs and verified by SHA-256; they are not part of the extension package. The exact sources and licences of each file are recorded in `extension/engine/models.manifest.json`.

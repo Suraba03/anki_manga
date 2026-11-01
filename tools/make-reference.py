@@ -6,7 +6,13 @@ For every *.jpg in the samples folder, writes <folder>/reference/<name>.json wit
   nms:     the raw postprocess_yolo blocks (xyxy int32 image coords, cls, conf),
   lines:   the DBNet quads handed to group_output (after box_thresh 0.6, image coords, int32).
 
-    cd helper && uv run python -I ../tools/make-reference.py $ANKI_MANGA_SAMPLES
+Needs a Python env with the v1 Python helper, which was removed from the tree and lives in git history
+(commit 0dd7e31): it provides anki_manga_helper.boxes and .engine, and brings torch, manga-ocr,
+comic-text-detector, Pillow and numpy. For example:
+
+    mkdir -p ~/am-ref && git archive 0dd7e31 helper | tar -x -C ~/am-ref
+    python3 -m venv ~/am-ref/venv && ~/am-ref/venv/bin/pip install ~/am-ref/helper
+    ~/am-ref/venv/bin/python -I tools/make-reference.py $ANKI_MANGA_SAMPLES
 
 The reference lives in the samples folder (gitignored); manga pages never enter the repo.
 """

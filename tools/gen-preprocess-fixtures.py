@@ -4,7 +4,10 @@ Runs the Python reference (comic_text_detector letterbox, manga_ocr crop + ViTIm
 manga_ocr post_process) on synthetic images, so the JS ports in extension/engine/{image,ocr}.js
 can be checked against it. No manga images are used.
 
-    cd helper && uv run python -I ../tools/gen-preprocess-fixtures.py
+Needs a Python env with: pip install mokuro==0.2.5
+(the version the v1 helper pinned; it brings torch, manga-ocr, comic-text-detector, numpy and Pillow), then:
+
+    python -I tools/gen-preprocess-fixtures.py
 """
 import json
 from pathlib import Path
@@ -15,7 +18,7 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "extension" / "test" / "fixtures" / "preprocess-reference.json"
 PREPROCESSOR_DIR = ROOT / "tools" / ".cache" / "models"  # holds preprocessor_config.json
-OCR_PAD = 4  # helper/src/anki_manga_helper/engine.py
+OCR_PAD = 4  # the v1 helper engine.py value (git history, commit 0dd7e31)
 
 
 def synth(w, h):

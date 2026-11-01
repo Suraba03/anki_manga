@@ -4,7 +4,10 @@ Runs the Python reference (SegDetectorRepresenter.boxes_from_bitmap with box_thr
 probability maps (filled rectangles and tilted quads), so extension/engine/dbnet.js can be checked against it.
 No manga images are used.
 
-    cd helper && uv run python -I ../tools/gen-dbnet-fixtures.py
+Needs a Python env with: pip install mokuro==0.2.5
+(the version the v1 helper pinned; it brings torch, comic-text-detector, opencv, numpy and shapely), then:
+
+    python -I tools/gen-dbnet-fixtures.py
 """
 import json
 from pathlib import Path
