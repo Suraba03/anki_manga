@@ -92,6 +92,48 @@ test("an OCR exception yields an empty text and the queue keeps going", async ()
   assert.deepEqual(got, [[0, "t0"], [1, ""], [2, "t2"]]);
 });
 
+test("a failed OCR is reported as not to be stored, a successful one (even an empty text) as stored", async () => {
+  const got = [];
+  const runOcr = async (_r, b) => {
+    if (b.id === 0) throw new Error("boom");
+    return b.id === 1 ? "" : "t";
+  };
+  const s = new OcrScheduler(runOcr, (pid, bid, text, persist) => got.push([bid, text, persist]));
+  s.enqueuePage("p", RGBA, mk(3));
+  await s.idle();
+  assert.deepEqual(got, [[0, "", false], [1, "", true], [2, "t", true]]);
+});
+
+test("clear drops queued jobs and discards the result of the running one", async () => {
+  const f = fakeOcr({ blockFirst: true });
+  const got = [];
+  const s = new OcrScheduler(f.runOcr, (pid, bid, text) => got.push(bid));
+  s.enqueuePage("p", RGBA, mk(4));
+  await f.firstStarted;
+  s.clear();
+  assert.equal(s.pending(), 0);
+  f.release();
+  await s.idle();
+  assert.deepEqual(got, [], "nothing is reported after a clear");
+  assert.deepEqual(f.calls, [0], "queued jobs never ran");
+  // The scheduler is usable again afterwards.
+  s.enqueuePage("q", RGBA, mk(1));
+  await s.idle();
+  assert.deepEqual(got, [0]);
+});
+
+test("a failure of the running job after clear is discarded too", async () => {
+  const f = fakeOcr({ blockFirst: true, fail: new Set([0]) });
+  const got = [];
+  const s = new OcrScheduler(f.runOcr, (pid, bid) => got.push(bid));
+  s.enqueuePage("p", RGBA, mk(2));
+  await f.firstStarted;
+  s.clear();
+  f.release();
+  await s.idle();
+  assert.deepEqual(got, []);
+});
+
 test("a throwing onText does not stop the queue", async () => {
   const f = fakeOcr();
   const s = new OcrScheduler(f.runOcr, () => {

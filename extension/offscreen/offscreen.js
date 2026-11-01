@@ -78,8 +78,9 @@ async function ensure(set, onProgress) {
   return ensureFiles(files, { cache: await caches.open(MODEL_CACHE), onProgress });
 }
 
-async function onText(pageId, bubbleId, text) {
-  await store.setText(pageId, bubbleId, text);
+// persist is false for the "" of a failed OCR: tabs learn the bubble is done, but a retry stays possible.
+async function onText(pageId, bubbleId, text, persist) {
+  if (persist) await store.setText(pageId, bubbleId, text);
   toWorker({ type: "eng:text", pageId, bubbleId, text });
 }
 const scheduler = new OcrScheduler((rgba, bubble) => engine.ocr(rgba, bubble), onText);
@@ -231,6 +232,9 @@ async function enginePrioritize({ pageId, bubbleId }) {
 
 async function engineClear() {
   store ||= await openStore(indexedDB);
+  // Queued jobs are dropped and the running one is awaited and discarded before the engine goes away.
+  scheduler.clear();
+  await scheduler.idle();
   await engine?.dispose();
   engine = null;
   decoded.clear();

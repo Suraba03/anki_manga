@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 const toTabs = [];
 const toOffscreen = [];
 const listeners = [];
+const tabEvents = { removed: [], updated: [] };
 const store = { local: {}, session: {} };
 let offscreenOpen = true;
 let granted = true;
@@ -34,8 +35,8 @@ globalThis.chrome = {
   offscreen: { createDocument: async () => {} },
   sidePanel: { setPanelBehavior: async () => {}, open: async () => {} },
   tabs: {
-    onRemoved: noEvents,
-    onUpdated: noEvents,
+    onRemoved: { addListener: (fn) => tabEvents.removed.push(fn) },
+    onUpdated: { addListener: (fn) => tabEvents.updated.push(fn) },
     query: async () => [],
     sendMessage: async (tabId, msg) => {
       toTabs.push([tabId, msg]);
@@ -101,22 +102,55 @@ test("eng:text is accepted only from the extension itself, not from a tab", asyn
   assert.equal(toTabs.length, 0);
 });
 
-test("after a service-worker restart a hover re-registers the watcher and the next text arrives", async () => {
+test("after a service-worker restart the persisted watchers still receive the next text", async () => {
   reset();
   const before = await startWorker("restart-1");
   await before({ type: "am:watch", pageId: "P" }, tab(5));
-  // The worker is torn down: all in-memory watchers are gone. OCR keeps running in the offscreen document.
+  await before({ type: "am:watch", pageId: "P" }, tab(6));
+  // The worker is torn down: module state is gone, session storage survives. OCR keeps running in the offscreen document.
   const send = await startWorker("restart-2");
-  await send(textMsg("P", 1, "lost"));
-  assert.equal(toTabs.length, 0, "no watchers after the restart");
+  await send(textMsg("P", 1, "kept"));
+  assert.deepEqual(toTabs.map(([id]) => id).sort(), [5, 6], "both tabs, without a new hover");
+  assert.equal(toTabs[0][1].text, "kept");
+});
 
-  // The content script's hover handler sends prioritize + watch for a bubble without text.
+test("after a restart a hover still re-requests: prioritize is sent and the watcher is (re-)registered", async () => {
+  reset();
+  const before = await startWorker("hover-1");
+  await before({ type: "am:watch", pageId: "P" }, tab(5));
+  const send = await startWorker("hover-2");
   await send({ type: "am:prioritize", pageId: "P", bubbleId: 2 }, tab(5));
   await send({ type: "am:watch", pageId: "P" }, tab(5));
   assert.deepEqual(toOffscreen.at(-1), { target: "offscreen", type: "eng:prioritize", pageId: "P", bubbleId: 2 });
-
   await send(textMsg("P", 2, "next"));
   assert.deepEqual(toTabs, [[5, { type: "am:bubble-text", pageId: "P", bubbleId: 2, text: "next" }]]);
+});
+
+test("watchers are pruned when a tab is closed or starts navigating", async () => {
+  reset();
+  const send = await startWorker("prune");
+  await send({ type: "am:watch", pageId: "P" }, tab(1));
+  await send({ type: "am:watch", pageId: "P" }, tab(2));
+  await send({ type: "am:watch", pageId: "Q" }, tab(3));
+  await tabEvents.removed.at(-1)(1);
+  await tabEvents.updated.at(-1)(3, { status: "loading" });
+  await tabEvents.updated.at(-1)(2, { status: "complete" }); // not a navigation
+  await send(textMsg("P", 0, "a"));
+  await send(textMsg("Q", 0, "b"));
+  assert.deepEqual(toTabs, [[2, { type: "am:bubble-text", pageId: "P", bubbleId: 0, text: "a" }]]);
+  // The pruning is persisted too: a restarted worker does not resurrect the closed tabs.
+  toTabs.length = 0;
+  const after = await startWorker("prune-2");
+  await after(textMsg("P", 1, "c"));
+  await after(textMsg("Q", 1, "d"));
+  assert.deepEqual(toTabs.map(([id]) => id), [2]);
+});
+
+test("am:engine is for extension pages only; a content script is refused", async () => {
+  reset();
+  const send = await startWorker("engine-guard");
+  assert.deepEqual(await send({ type: "am:engine", msg: { type: "eng:clear" } }, tab(1)), { ok: false });
+  assert.equal(toOffscreen.length, 0);
 });
 
 test("a text that was already known comes back with the prioritize reply and goes to that tab", async () => {

@@ -85,7 +85,36 @@ export async function engineCall(msg) {
 // --- page pipeline ------------------------------------------------------------------
 // The offscreen document fetches/decodes the image, detects bubbles and OCRs them; this side checks the
 // image-host permission and relays finished texts to the tabs that show the page.
-const watchers = new Map(); // pageId -> Set<tabId>; in-memory only, content scripts re-register on hover
+// pageId -> Set<tabId>. Mirrored in chrome.storage.session so a restarted worker still knows who watches a page
+// (a text finishing after a restart would otherwise be dropped); loaded lazily on first use.
+const watchers = new Map();
+let watchersLoaded = null;
+let watchersSaved = Promise.resolve();
+
+function loadWatchers() {
+  watchersLoaded ||= chrome.storage.session.get("watchers").then(({ watchers: saved = {} }) => {
+    for (const [pageId, tabs] of Object.entries(saved)) {
+      const set = watchers.get(pageId) || new Set();
+      for (const t of tabs) set.add(t);
+      watchers.set(pageId, set);
+    }
+  });
+  return watchersLoaded;
+}
+
+function saveWatchers() {
+  const snapshot = {};
+  for (const [pageId, tabs] of watchers) if (tabs.size) snapshot[pageId] = [...tabs];
+  watchersSaved = watchersSaved.then(() => chrome.storage.session.set({ watchers: snapshot })).catch(() => {});
+  return watchersSaved;
+}
+
+async function forgetWatcher(tabId) {
+  await loadWatchers();
+  let changed = false;
+  for (const tabs of watchers.values()) changed = tabs.delete(tabId) || changed;
+  if (changed) await saveWatchers();
+}
 
 async function noteMissingHost(tabId, host) {
   const { missingHosts = {} } = await chrome.storage.session.get("missingHosts");
@@ -115,15 +144,20 @@ async function processImage(msg, sender) {
   return engineCall({ type: "eng:page", source: { url: msg.imageUrl }, ocr: await ocrScope() });
 }
 
-export function relayText({ pageId, bubbleId, text }) {
+export async function relayText({ pageId, bubbleId, text }) {
+  await loadWatchers();
   for (const tabId of watchers.get(pageId) || []) {
     chrome.tabs.sendMessage(tabId, { type: "am:bubble-text", pageId, bubbleId, text }).catch(() => {});
   }
 }
 
-function watchPage(tabId, pageId) {
+async function watchPage(tabId, pageId) {
+  await loadWatchers();
   if (!watchers.has(pageId)) watchers.set(pageId, new Set());
-  watchers.get(pageId).add(tabId);
+  const tabs = watchers.get(pageId);
+  if (tabs.has(tabId)) return;
+  tabs.add(tabId);
+  await saveWatchers();
 }
 
 // The PNG header holds the image width at bytes 16-19: no need to decode the screenshot here.
@@ -185,12 +219,12 @@ const handlers = {
   "am:disable-site": (msg) => disableSite(msg.origin, msg.tabId).then(() => ({ ok: true })),
   "am:page": processImage,
   "am:capture": captureElement,
-  "am:watch": (msg, sender) => {
-    if (sender.tab) watchPage(sender.tab.id, msg.pageId);
-    return Promise.resolve({ ok: true });
+  "am:watch": async (msg, sender) => {
+    if (sender.tab) await watchPage(sender.tab.id, msg.pageId);
+    return { ok: true };
   },
   "am:prioritize": prioritize,
-  "am:engine": (msg) => engineCall(msg.msg),
+  "am:engine": async (msg, sender) => (sender.tab ? { ok: false } : engineCall(msg.msg)), // panel only
   // Messages from the offscreen document (a content script must not be able to send these). The
   // offscreen document has no chrome.storage, so the worker reads and writes it on the engine's behalf.
   "eng:text": fromEngine(async (msg) => relayText(msg)),
@@ -221,12 +255,15 @@ async function forgetStatus(tabId) {
   await chrome.storage.session.set({ pageStatus });
 }
 chrome.tabs.onUpdated.addListener((tabId, info) => {
-  if (info.status === "loading") forgetStatus(tabId);
+  if (info.status === "loading") {
+    forgetStatus(tabId);
+    forgetWatcher(tabId); // a navigation destroys the page's overlay; its content script registers again
+  }
 });
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   forgetStatus(tabId);
-  for (const tabs of watchers.values()) tabs.delete(tabId);
+  await forgetWatcher(tabId);
   const { missingHosts = {} } = await chrome.storage.session.get("missingHosts");
   if (missingHosts[tabId]) {
     delete missingHosts[tabId];

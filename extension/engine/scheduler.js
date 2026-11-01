@@ -5,7 +5,9 @@ const NORMAL = 10;
 const URGENT = 0;
 
 // runOcr(rgba, bubble) → Promise<string>. onText(pageId, bubbleId, text) is called for every finished bubble
-// (the caller stores it and tells the tabs); a rejected runOcr yields onText(..., "") so the bubble counts as done.
+// (the caller tells the tabs and, when `persist` is true, stores it). A rejected runOcr yields onText(..., "", false):
+// the bubble counts as done for the tabs, but the empty text must not be cached as if OCR had found nothing.
+// clear() drops the queue and the result of the job running at that moment.
 export class OcrScheduler {
   constructor(runOcr, onText) {
     this.runOcr = runOcr;
@@ -13,6 +15,7 @@ export class OcrScheduler {
     this.jobs = new Map(); // `${pageId}:${bubbleId}` → {pageId, bubble, priority, seq}
     this.pages = new Map(); // pageId → rgba, dropped when the page has no jobs left
     this.seq = 0;
+    this.generation = 0; // bumped by clear(): results of earlier generations are discarded
     this.running = null;
   }
 
@@ -30,6 +33,12 @@ export class OcrScheduler {
   prioritize(pageId, bubbleId) {
     const job = this.jobs.get(`${pageId}:${bubbleId}`);
     if (job && job.priority > URGENT) Object.assign(job, { priority: URGENT, seq: this.seq++ });
+  }
+
+  clear() {
+    this.generation++;
+    this.jobs.clear();
+    this.pages.clear();
   }
 
   pending() {
@@ -54,16 +63,20 @@ export class OcrScheduler {
     await Promise.resolve();
     for (let job; (job = this.next()); ) {
       const { pageId, bubble } = job;
+      const generation = this.generation;
       let text;
+      let persist = true;
       try {
         text = await this.runOcr(this.pages.get(pageId), bubble);
       } catch {
-        text = ""; // keep the queue alive; an empty text marks the bubble done
+        text = ""; // keep the queue alive; the bubble is done, but nothing is cached
+        persist = false;
       }
+      if (generation !== this.generation) continue; // cleared meanwhile: the result belongs to a dropped state
       this.jobs.delete(`${pageId}:${bubble.id}`);
       if (![...this.jobs.values()].some((j) => j.pageId === pageId)) this.pages.delete(pageId);
       try {
-        await this.onText(pageId, bubble.id, text);
+        await this.onText(pageId, bubble.id, text, persist);
       } catch {
         /* a failing sink must not stop OCR */
       }
