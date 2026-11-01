@@ -1,8 +1,8 @@
-import { test, mock } from "node:test";
+import { test, mock, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { handleExplain, parseConfig, explanationKey } from "../src/explain.js";
-import { PROMPT_VERSION } from "../../extension/lib/prompt.js";
+import { handleExplain, parseConfig, explanationKey, originAllowed } from "../src/explain.js";
+import { PROMPT_VERSION, SYSTEM_PROMPT } from "../../extension/lib/prompt.js";
 
 const ID = "3b241101-e2bb-4255-8caf-4136c566a962";
 const ID2 = "9f1c2d3e-0000-4000-8000-000000000001";
@@ -73,6 +73,13 @@ function setup(over = {}) {
 }
 
 const body = (over = {}) => ({ install_id: ID, text: "こんにちは", prompt_version: PROMPT_VERSION, ...over });
+// Failure paths log a short cause with console.error; keep the test output clean and let tests inspect it.
+let errors;
+beforeEach(() => {
+  errors = mock.method(console, "error", () => {});
+});
+afterEach(() => errors.mock.restore());
+
 const sha = (s) => createHash("sha256").update(s).digest("hex");
 
 test("explanationKey matches the extension: sha256 of version, newline and trimmed NFKC text", async () => {
@@ -260,14 +267,14 @@ test("an LLM failure is 502 free_unavailable with nothing cached or counted", as
   assert.equal(db.spend.size, 0);
 });
 
-test("an unparseable LLM answer is 502 free_unavailable with nothing cached or counted", async () => {
+test("an unparseable LLM answer is 502 free_unavailable with nothing cached or counted against quotas", async () => {
+  // Its spend is charged (see the "paid but unparseable" test): the call was billed.
   const { db, ctx } = setup({ callLlm: async () => ({ result: "not json", usage: USAGE }) });
   const r = await handleExplain(body(), ctx);
   assert.equal(r.status, 502);
   assert.equal(r.json.error, "free_unavailable");
   assert.equal(db.cache.size, 0);
   assert.equal(db.installs.size, 0);
-  assert.equal(db.spend.size, 0);
 });
 
 test("a disallowed Origin is 403 and nothing runs", async () => {
@@ -327,4 +334,114 @@ test("parseConfig reads string vars into numbers", () => {
 
 test("parseConfig throws on a missing or non-numeric number var", () => {
   assert.throws(() => parseConfig({ DAILY_PER_INSTALL: "x" }));
+});
+
+const estimateCost = (text) =>
+  700 * CONFIG.PRICE_OUT + (Array.from(SYSTEM_PROMPT).length + Array.from(text).length) * CONFIG.PRICE_IN_MISS;
+
+test("missing usage on a success charges the conservative estimate", async () => {
+  const { db, ctx } = setup({ callLlm: async () => ({ result: RAW }) });
+  const r = await handleExplain(body(), ctx);
+  assert.equal(r.status, 200);
+  assert.ok(Math.abs((await db.getSpend(MONTH)) - estimateCost("こんにちは")) < 1e-12);
+});
+
+test("garbage usage (non-numeric, negative, wrong type) charges the estimate", async () => {
+  for (const usage of [null, "x", [], {}, { completion_tokens: "many" }, { prompt_cache_hit_tokens: -5, prompt_cache_miss_tokens: NaN, completion_tokens: -1 }]) {
+    const { db, ctx } = setup({ callLlm: async () => ({ result: RAW, usage }) });
+    await handleExplain(body(), ctx);
+    assert.ok(Math.abs((await db.getSpend(MONTH)) - estimateCost("こんにちは")) < 1e-12, JSON.stringify(usage));
+  }
+});
+
+test("usage with only the output count charges the estimate for the input side", async () => {
+  const { db, ctx } = setup({ callLlm: async () => ({ result: RAW, usage: { completion_tokens: 30 } }) });
+  await handleExplain(body(), ctx);
+  const want = 30 * CONFIG.PRICE_OUT + (Array.from(SYSTEM_PROMPT).length + 5) * CONFIG.PRICE_IN_MISS;
+  assert.ok(Math.abs((await db.getSpend(MONTH)) - want) < 1e-12);
+});
+
+test("a paid but unparseable answer adds its spend, but no quota and no cache, and is 502", async () => {
+  const { db, ctx } = setup({ callLlm: async () => ({ result: "not json", usage: USAGE }) });
+  const r = await handleExplain(body(), ctx);
+  assert.equal(r.status, 502);
+  assert.equal(r.json.error, "free_unavailable");
+  assert.ok(Math.abs((await db.getSpend(MONTH)) - COST) < 1e-12);
+  assert.equal(db.cache.size, 0);
+  assert.equal(db.installs.size, 0);
+  assert.equal(db.ips.size, 0);
+});
+
+test("a paid unparseable answer without usage is charged the estimate", async () => {
+  const { db, ctx } = setup({ callLlm: async () => ({ result: "not json" }) });
+  assert.equal((await handleExplain(body(), ctx)).status, 502);
+  assert.ok(Math.abs((await db.getSpend(MONTH)) - estimateCost("こんにちは")) < 1e-12);
+});
+
+test("a callLlm failure flagged as paid (HTTP 200, unreadable payload) is charged and still 502", async () => {
+  const { db, ctx } = setup({
+    callLlm: async () => {
+      throw Object.assign(new Error("bad payload"), { paid: true, usage: USAGE });
+    },
+  });
+  assert.equal((await handleExplain(body(), ctx)).status, 502);
+  assert.ok(Math.abs((await db.getSpend(MONTH)) - COST) < 1e-12);
+  assert.equal(db.installs.size, 0);
+});
+
+test("a paid unparseable answer that crosses 80% of the cap still warns", async () => {
+  const warn = mock.method(console, "warn", () => {});
+  try {
+    const { db, ctx } = setup({ callLlm: async () => ({ result: "not json", usage: USAGE }) });
+    db.spend.set(MONTH, 7.99);
+    await handleExplain(body(), { ...ctx, config: { ...CONFIG, PRICE_OUT: 0.001 } });
+    assert.equal(warn.mock.callCount(), 1);
+  } finally {
+    warn.mock.restore();
+  }
+});
+
+test("after a paid call spend is written first, then cache, then the counters", async () => {
+  const { db, ctx } = setup();
+  const order = [];
+  for (const name of ["addSpend", "putCache", "incInstall", "incIp"]) {
+    const f = db[name];
+    db[name] = async (...a) => (order.push(name), f(...a));
+  }
+  await handleExplain(body(), ctx);
+  assert.deepEqual(order, ["addSpend", "putCache", "incInstall", "incIp"]);
+});
+
+test("a putCache failure still leaves the spend recorded", async () => {
+  const { db, ctx } = setup();
+  db.putCache = async () => {
+    throw new Error("d1 down");
+  };
+  await assert.rejects(handleExplain(body(), ctx));
+  assert.ok(Math.abs((await db.getSpend(MONTH)) - COST) < 1e-12);
+});
+
+test("only the exact chrome-extension://* entry is a wildcard; other trailing * are literal", () => {
+  const cfg = (ALLOWED_ORIGINS) => ({ ...CONFIG, ALLOWED_ORIGINS });
+  assert.equal(originAllowed("https://foo.evil.com", cfg("https://foo*")), false);
+  assert.equal(originAllowed("https://foo*", cfg("https://foo*")), true);
+  assert.equal(originAllowed("chrome-extension://abc", cfg("chrome-extension://*")), true);
+  assert.equal(originAllowed("chrome-extension://abc", cfg("chrome-ext*")), false);
+  assert.equal(originAllowed("chrome-extension://abc", cfg("chrome-extension://abc*")), false);
+});
+
+test("an LLM failure logs a short cause and nothing secret", async () => {
+  const text = "ひみつのテキスト";
+  const { ctx } = setup({
+    ipHash: "iphash-secret",
+    callLlm: async () => {
+      throw Object.assign(new Error(`failed for sk-SECRETKEY text=${text} ip=203.0.113.9 iphash-secret ${ID}`), { status: 500 });
+    },
+  });
+  assert.equal((await handleExplain(body({ text }), ctx)).status, 502);
+  assert.ok(errors.mock.callCount() >= 1);
+  const logged = errors.mock.calls.map((c) => c.arguments.join(" ")).join("\n");
+  for (const secret of ["SECRETKEY", text, "203.0.113.9", "iphash-secret", ID]) assert.ok(!logged.includes(secret), secret);
+  assert.match(logged, /Error/);
+  assert.match(logged, /500/);
 });

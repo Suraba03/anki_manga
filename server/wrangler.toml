@@ -13,9 +13,9 @@ MONTHLY_CAP_USD = "10"
 PRICE_IN_HIT = "0.000000006"
 PRICE_IN_MISS = "0.0000003"
 PRICE_OUT = "0.0000012"
-# The pricing page now lists "deepseek-flash"; the extension's own-key path still sends "deepseek-chat".
-# VERIFY before deploy that this name is still accepted by the API.
-LLM_MODEL = "deepseek-chat"
+# The model name the pricing page lists (the extension's own-key default is the same).
+# VERIFY before deploy that it is still current.
+LLM_MODEL = "deepseek-flash"
 # Comma-separated. "chrome-extension://*" matches any extension until the Web Store ID is known;
 # then replace it with "chrome-extension://<store id>".
 ALLOWED_ORIGINS = "chrome-extension://*"

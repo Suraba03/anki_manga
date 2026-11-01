@@ -1,13 +1,14 @@
 // Cloudflare Worker entry: CORS, D1 adapter, DeepSeek call. The request logic is in explain.js.
 import { buildMessages } from "../../extension/lib/prompt.js";
-import { handleExplain, parseConfig, originAllowed } from "./explain.js";
+import { handleExplain, parseConfig, originAllowed, describeError } from "./explain.js";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/chat/completions";
 const LLM_TIMEOUT_MS = 30000;
 const MAX_BODY_BYTES = 8192;
+const DEFAULT_MODEL = "deepseek-flash";
 
 // Same request as the extension's own-key path. -> {result: message content, usage}
-export async function callDeepSeek(text, { apiKey, model, fetch: doFetch = fetch, timeoutMs = LLM_TIMEOUT_MS }) {
+export async function callDeepSeek(text, { apiKey, model = DEFAULT_MODEL, fetch: doFetch = fetch, timeoutMs = LLM_TIMEOUT_MS }) {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
   try {
@@ -23,11 +24,17 @@ export async function callDeepSeek(text, { apiKey, model, fetch: doFetch = fetch
         stream: false,
       }),
     });
-    if (resp.status !== 200) throw new Error(`DeepSeek HTTP ${resp.status}`);
-    const data = await resp.json();
-    const content = data.choices[0].message.content;
-    if (typeof content !== "string") throw new Error("DeepSeek: no content");
-    return { result: content, usage: data.usage ?? {} };
+    if (resp.status !== 200) throw Object.assign(new Error("DeepSeek HTTP error"), { status: resp.status });
+    // From here on DeepSeek has billed the call: errors are flagged `paid` so the spend is still charged.
+    let data;
+    try {
+      data = await resp.json();
+    } catch {
+      throw Object.assign(new Error("DeepSeek: unreadable body"), { paid: true });
+    }
+    const content = data?.choices?.[0]?.message?.content;
+    if (typeof content !== "string") throw Object.assign(new Error("DeepSeek: no content"), { paid: true, usage: data?.usage });
+    return { result: content, usage: data.usage };
   } finally {
     clearTimeout(timer);
   }
@@ -113,14 +120,15 @@ export async function handle(request, env, deps = {}) {
     const ipHash = await sha256Hex(env.IP_SALT + (request.headers.get("CF-Connecting-IP") ?? ""));
     const { status, json, headers } = await handleExplain(body, {
       db: deps.db ?? makeD1Db(env.DB),
-      callLlm: deps.callLlm ?? ((text) => callDeepSeek(text, { apiKey: env.DEEPSEEK_API_KEY, model: env.LLM_MODEL || "deepseek-chat" })),
+      callLlm: deps.callLlm ?? ((text) => callDeepSeek(text, { apiKey: env.DEEPSEEK_API_KEY, model: env.LLM_MODEL || DEFAULT_MODEL, fetch: deps.fetch })),
       now: deps.now ?? new Date(),
       ipHash,
       origin,
       config,
     });
     return respond(status, json, cors, headers);
-  } catch {
+  } catch (e) {
+    console.error("free tier: request failed:", describeError(e));
     return respond(502, { error: "free_unavailable" }, cors);
   }
 }

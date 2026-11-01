@@ -1,11 +1,12 @@
 // Pure request logic of the free tier: validation, quotas, spend cap, shared cache.
 // No I/O of its own: the db, the LLM call, the clock and the IP hash are passed in.
-import { PROMPT_VERSION, parseExplanation } from "../../extension/lib/prompt.js";
+import { PROMPT_VERSION, SYSTEM_PROMPT, parseExplanation } from "../../extension/lib/prompt.js";
 
 export const MAX_TEXT_CHARS = 300;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const NUMBER_VARS = ["DAILY_PER_INSTALL", "DAILY_PER_IP", "MONTHLY_CAP_USD", "PRICE_IN_HIT", "PRICE_IN_MISS", "PRICE_OUT"];
 const WARN_FRACTION = 0.8;
+const MAX_OUTPUT_TOKENS = 700; // the max_tokens worker.js sends
 
 // Wrangler vars are strings.
 export function parseConfig(env) {
@@ -25,13 +26,37 @@ export async function explanationKey(text) {
   return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-// origin: the Origin request header or null. An entry ending in "*" is a prefix match.
+const ANY_EXTENSION = "chrome-extension://*";
+
+// origin: the Origin request header or null. Entries are exact origins, except the single
+// wildcard "chrome-extension://*" (any extension, until the Web Store ID is known).
 export function originAllowed(origin, config) {
   if (!origin) return config.ALLOW_NO_ORIGIN === "1";
   return config.ALLOWED_ORIGINS.split(",")
     .map((s) => s.trim())
     .filter(Boolean)
-    .some((entry) => (entry.endsWith("*") ? origin.startsWith(entry.slice(0, -1)) : origin === entry));
+    .some((entry) => (entry === ANY_EXTENSION ? origin.startsWith("chrome-extension://") : origin === entry));
+}
+
+// A short, safe description of a caught error for the logs: names and a status, never the message
+// (which can carry request text, the key or SQL parameters).
+export function describeError(e) {
+  return [e?.name, e?.kind, e?.status].filter((v) => v !== undefined && v !== null && v !== "").join(" ") || "unknown";
+}
+
+const tokenCount = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
+
+// USD for one paid call. Missing or garbage usage is charged a deliberately high estimate
+// (max output, and every code point of prompt and text as an input token) so the cap holds.
+function costOf(usage, text, config) {
+  const hit = tokenCount(usage?.prompt_cache_hit_tokens);
+  const miss = tokenCount(usage?.prompt_cache_miss_tokens);
+  const out = tokenCount(usage?.completion_tokens) ?? MAX_OUTPUT_TOKENS;
+  const input =
+    hit !== null && miss !== null
+      ? hit * config.PRICE_IN_HIT + miss * config.PRICE_IN_MISS
+      : (Array.from(SYSTEM_PROMPT).length + Array.from(text).length) * config.PRICE_IN_MISS;
+  return input + out * config.PRICE_OUT;
 }
 
 const reply = (status, json, headers = {}) => ({ status, json, headers });
@@ -65,31 +90,38 @@ export async function handleExplain(body, { db, callLlm, now, ipHash, origin, co
   const spentBefore = await db.getSpend(month);
   if (spentBefore >= config.MONTHLY_CAP_USD) return err(429, "free_monthly_cap");
 
-  let result;
-  let usage;
+  // Charge the spend of a paid call first: it is the owner's money guarantee, so it must survive
+  // a failure of any later write. Separate single-statement UPSERTs: D1 has no cross-statement
+  // transaction here, so two concurrent requests can both pass the checks above (a small, accepted overshoot).
+  const charge = async (usage) => {
+    const cost = costOf(usage, text, config);
+    await db.addSpend(month, cost);
+    const warnAt = config.MONTHLY_CAP_USD * WARN_FRACTION;
+    if (spentBefore < warnAt && spentBefore + cost >= warnAt) {
+      console.warn(`free tier: monthly spend ${(spentBefore + cost).toFixed(4)} USD passed 80% of the ${config.MONTHLY_CAP_USD} USD cap`);
+    }
+  };
+
+  let out;
   try {
-    const out = await callLlm(text);
-    usage = out.usage;
-    result = parseExplanation(out.result);
-  } catch {
+    out = await callLlm(text);
+  } catch (e) {
+    console.error("free tier: LLM call failed:", describeError(e));
+    if (e?.paid) await charge(e.usage); // HTTP 200 but unreadable: DeepSeek billed it
+    return err(502, "free_unavailable");
+  }
+  let result;
+  try {
+    result = parseExplanation(out?.result);
+  } catch (e) {
+    console.error("free tier: LLM answer rejected:", describeError(e));
+    await charge(out?.usage); // paid, but no quota use and nothing cached
     return err(502, "free_unavailable");
   }
 
-  const tokens = (name) => Number(usage?.[name]) || 0;
-  const cost =
-    tokens("prompt_cache_hit_tokens") * config.PRICE_IN_HIT +
-    tokens("prompt_cache_miss_tokens") * config.PRICE_IN_MISS +
-    tokens("completion_tokens") * config.PRICE_OUT;
-  // Separate single-statement UPSERTs: D1 has no cross-statement transaction here, so two
-  // concurrent requests can both pass the checks above (a small, accepted overshoot).
+  await charge(out.usage);
   await db.putCache(key, text, result);
   await db.incInstall(day, installId);
   await db.incIp(day, ipHash);
-  await db.addSpend(month, cost);
-
-  const warnAt = config.MONTHLY_CAP_USD * WARN_FRACTION;
-  if (spentBefore < warnAt && spentBefore + cost >= warnAt) {
-    console.warn(`free tier: monthly spend ${(spentBefore + cost).toFixed(4)} USD passed 80% of the ${config.MONTHLY_CAP_USD} USD cap`);
-  }
   return reply(200, { result }, remainingHeader(config.DAILY_PER_INSTALL, installUsed + 1));
 }

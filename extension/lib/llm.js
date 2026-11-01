@@ -3,7 +3,7 @@ import { PROMPT_VERSION, ExplainError, buildMessages, parseExplanation } from ".
 
 export const FREE_URL = ""; // the free-tier server endpoint; filled in with Task 13
 const DEEPSEEK_BASE = "https://api.deepseek.com";
-const DEFAULT_MODEL = "deepseek-chat";
+const DEFAULT_MODEL = "deepseek-flash";
 const FREE_MAX_CHARS = 300;
 const DEFAULT_TIMEOUT_MS = 30000; // as v1
 

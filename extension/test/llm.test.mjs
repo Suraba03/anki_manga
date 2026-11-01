@@ -112,7 +112,7 @@ test("own key: success sends bearer, v1 body, DeepSeek URL; stores under explana
   assert.equal(c.init.headers.Authorization, "Bearer sk-ok");
   assert.equal(c.init.headers["Content-Type"], "application/json");
   assert.deepEqual(c.body, {
-    model: "deepseek-chat",
+    model: "deepseek-flash",
     messages: buildMessages(TEXT),
     response_format: { type: "json_object" },
     max_tokens: 700,
@@ -144,7 +144,7 @@ test("custom provider uses baseUrl without trailing slashes and the configured m
   assert.equal(f.calls[0].body.model, "my-model");
   const g = fakeFetch(() => jsonResponse(200, chatPayload()));
   await run("x", own({ provider: "custom", baseUrl: "https://llm.example.test/v1", model: "" }), g);
-  assert.equal(g.calls[0].body.model, "deepseek-chat");
+  assert.equal(g.calls[0].body.model, "deepseek-flash");
 });
 
 test("own key sends the full text even over 300 chars", async () => {

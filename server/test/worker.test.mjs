@@ -1,7 +1,8 @@
-import { test } from "node:test";
+import { test, mock, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import worker, { handle, callDeepSeek, makeD1Db } from "../src/worker.js";
+import { readFileSync } from "node:fs";
 import { buildMessages } from "../../extension/lib/prompt.js";
 
 const ID = "3b241101-e2bb-4255-8caf-4136c566a962";
@@ -35,6 +36,12 @@ function memoryDb() {
     addSpend: async (m, u) => void spend.set(m, (spend.get(m) ?? 0) + u),
   };
 }
+
+let errors;
+beforeEach(() => {
+  errors = mock.method(console, "error", () => {});
+});
+afterEach(() => errors.mock.restore());
 
 const req = (over = {}, bodyObj) =>
   new Request(over.url ?? "https://w.example/explain", {
@@ -159,12 +166,12 @@ test("callDeepSeek sends the same body as the extension's own-key path", async (
       usage: { prompt_cache_hit_tokens: 1, prompt_cache_miss_tokens: 2, completion_tokens: 3, total_tokens: 6 },
     });
   };
-  const out = await callDeepSeek("こんにちは", { apiKey: "sk-x", model: "deepseek-chat", fetch });
+  const out = await callDeepSeek("こんにちは", { apiKey: "sk-x", model: "deepseek-flash", fetch });
   assert.equal(seen.url, "https://api.deepseek.com/chat/completions");
   assert.equal(seen.init.method, "POST");
   assert.equal(seen.init.headers.Authorization, "Bearer sk-x");
   assert.deepEqual(JSON.parse(seen.init.body), {
-    model: "deepseek-chat",
+    model: "deepseek-flash",
     messages: buildMessages("こんにちは"),
     response_format: { type: "json_object" },
     max_tokens: 700,
@@ -215,4 +222,46 @@ test("makeD1Db issues UPSERTs and bound queries against the D1 binding", async (
   assert.deepEqual(log[2].args, ["2026-11", 0.25]);
   assert.match(log[3].sql, /INSERT OR REPLACE INTO cache/);
   assert.deepEqual(log[3].args, ["k", "text", JSON.stringify({ translation: "x" }), 1700000000000]);
+});
+
+test("a DB failure logs a short cause and nothing secret", async () => {
+  const db = memoryDb();
+  db.getCache = async () => {
+    throw new Error("D1_ERROR: SELECT ... こんにちは sk-test 203.0.113.9");
+  };
+  const r = await handle(req(), ENV, deps({ db }));
+  assert.equal(r.status, 502);
+  const logged = errors.mock.calls.map((c) => c.arguments.join(" ")).join("\n");
+  assert.ok(errors.mock.callCount() >= 1);
+  for (const secret of ["sk-test", "こんにちは", "203.0.113.9", "salt"]) assert.ok(!logged.includes(secret), secret);
+});
+
+test("the model comes from LLM_MODEL and defaults to deepseek-flash", async () => {
+  const seen = [];
+  const fetch = async (_u, init) => {
+    seen.push(JSON.parse(init.body).model);
+    return Response.json({ choices: [{ message: { content: RAW } }], usage: { completion_tokens: 1 } });
+  };
+  const noLlm = () => ({ db: memoryDb(), now: new Date("2026-11-01T00:00:00Z"), fetch });
+  await handle(req(), ENV, noLlm());
+  await handle(req(), { ...ENV, LLM_MODEL: "other-model" }, noLlm());
+  assert.deepEqual(seen, ["deepseek-flash", "other-model"]);
+});
+
+test("a 200 from DeepSeek with an unreadable payload is flagged paid; HTTP errors are not", async () => {
+  const bad = await callDeepSeek("a", { apiKey: "k", model: "m", fetch: async () => new Response("<html>", { status: 200 }) }).catch((e) => e);
+  assert.equal(bad.paid, true);
+  const http = await callDeepSeek("a", { apiKey: "k", model: "m", fetch: async () => new Response("no", { status: 500 }) }).catch((e) => e);
+  assert.notEqual(http.paid, true);
+  assert.equal(http.status, 500);
+  const usage = { completion_tokens: 4 };
+  const noContent = await callDeepSeek("a", { apiKey: "k", model: "m", fetch: async () => Response.json({ choices: [], usage }) }).catch((e) => e);
+  assert.equal(noContent.paid, true);
+  assert.deepEqual(noContent.usage, usage);
+});
+
+test("wrangler.toml ships deepseek-flash and a placeholder database id", () => {
+  const toml = readFileSync(new URL("../wrangler.toml", import.meta.url), "utf8");
+  assert.match(toml, /^LLM_MODEL = "deepseek-flash"$/m);
+  assert.match(toml, /^database_id = "REPLACE_WITH_D1_ID"$/m);
 });
