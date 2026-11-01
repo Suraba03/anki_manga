@@ -5,10 +5,13 @@ export const FREE_URL = ""; // the free-tier server endpoint; filled in with Tas
 const DEEPSEEK_BASE = "https://api.deepseek.com";
 const DEFAULT_MODEL = "deepseek-chat";
 const FREE_MAX_CHARS = 300;
+const DEFAULT_TIMEOUT_MS = 30000; // as v1
+
+const inFlight = new Map(); // cache key -> Promise of the result, so one text is never requested twice at once
 
 const fail = (error) => ({ ok: false, error });
 
-async function callFree(text, { settings, fetch, freeUrl }) {
+async function callFree(text, { settings, fetch, freeUrl, signal }) {
   if (!freeUrl) throw new ExplainError("free_unavailable");
   const sent = Array.from(text).slice(0, FREE_MAX_CHARS).join("");
   let resp;
@@ -16,6 +19,7 @@ async function callFree(text, { settings, fetch, freeUrl }) {
   try {
     resp = await fetch(freeUrl, {
       method: "POST",
+      signal,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ install_id: settings.installId, text: sent, prompt_version: PROMPT_VERSION }),
     });
@@ -37,7 +41,7 @@ async function callFree(text, { settings, fetch, freeUrl }) {
   return { result, remaining: Number.isFinite(remaining) ? remaining : null };
 }
 
-async function callOwn(text, { settings, fetch }) {
+async function callOwn(text, { settings, fetch, signal }) {
   const llm = settings.llm;
   if (!llm.apiKey) throw new ExplainError("no_api_key");
   const base = llm.provider === "custom" ? llm.baseUrl.replace(/\/+$/, "") : DEEPSEEK_BASE;
@@ -45,6 +49,7 @@ async function callOwn(text, { settings, fetch }) {
   try {
     resp = await fetch(`${base}/chat/completions`, {
       method: "POST",
+      signal,
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${llm.apiKey}` },
       body: JSON.stringify({
         model: llm.model || DEFAULT_MODEL,
@@ -65,23 +70,41 @@ async function callOwn(text, { settings, fetch }) {
   try {
     content = (await resp.json()).choices[0].message.content;
   } catch {
-    throw new ExplainError("bad_response", "unexpected payload");
+    throw new ExplainError(signal?.aborted ? "network" : "bad_response", "unexpected payload");
   }
   return { result: parseExplanation(content), remaining: null };
 }
 
-// -> {ok:true, result, cached, remaining} | {ok:false, error}
-export async function explain(text, { settings, store, fetch, freeUrl }) {
-  if (typeof text !== "string" || !text.trim()) return fail("no_text");
-  const key = await store.explanationKey(text);
-  const hit = await store.getExplanation(key);
-  if (hit) return { ok: true, result: hit, cached: true, remaining: null };
+async function attempt(text, key, { settings, store, fetch, freeUrl, timeoutMs }) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
   try {
-    const { result, remaining } = await (settings.llm.mode === "own" ? callOwn : callFree)(text, { settings, fetch, freeUrl });
-    await store.putExplanation(key, result);
+    const { result, remaining } = await (settings.llm.mode === "own" ? callOwn : callFree)(text, { settings, fetch, freeUrl, signal: ctl.signal });
+    if (key) await Promise.resolve(store.putExplanation(key, result)).catch(() => {}); // best effort: never lose a paid result
     return { ok: true, result, cached: false, remaining };
   } catch (e) {
     if (e instanceof ExplainError) return fail(e.kind);
-    throw e;
+    return fail(settings.llm.mode === "own" ? "network" : "free_unavailable");
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Never rejects. -> {ok:true, result, cached, remaining} | {ok:false, error}
+export async function explain(text, { settings, store, fetch, freeUrl, timeoutMs = DEFAULT_TIMEOUT_MS }) {
+  if (typeof text !== "string" || !text.trim()) return fail("no_text");
+  const key = await Promise.resolve().then(() => store.explanationKey(text)).catch(() => null);
+  if (key) {
+    const hit = await Promise.resolve().then(() => store.getExplanation(key)).catch(() => null);
+    if (hit) return { ok: true, result: hit, cached: true, remaining: null };
+    if (inFlight.has(key)) return inFlight.get(key);
+  }
+  const p = attempt(text, key, { settings, store, fetch, freeUrl, timeoutMs });
+  if (!key) return p;
+  inFlight.set(key, p);
+  try {
+    return await p;
+  } finally {
+    inFlight.delete(key);
   }
 }

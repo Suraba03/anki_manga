@@ -261,3 +261,94 @@ test("free mode with exactly 300 chars is sent unchanged", async () => {
   await run(t, free(), f);
   assert.equal(f.calls[0].body.text, t);
 });
+
+// ---- review fixes: timeout, best-effort cache, in-flight dedup ----
+
+const hangingFetch = () =>
+  fakeFetch(
+    (_url, init) =>
+      new Promise((_, reject) => {
+        init.signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      }),
+  );
+
+test("timeout: a hanging free-tier request is free_unavailable and nothing is cached", async () => {
+  const store = fakeStore();
+  const f = hangingFetch();
+  assert.deepEqual(await explain("t1", { settings: free(), store, fetch: f, freeUrl: FREE_URL_TEST, timeoutMs: 20 }), { ok: false, error: "free_unavailable" });
+  assert.equal(store.data.size, 0);
+  assert.ok(f.calls[0].init.signal);
+});
+
+test("timeout: a hanging own-key request is network and nothing is cached", async () => {
+  const store = fakeStore();
+  assert.deepEqual(await explain("t2", { settings: own(), store, fetch: hangingFetch(), freeUrl: FREE_URL_TEST, timeoutMs: 20 }), { ok: false, error: "network" });
+  assert.equal(store.data.size, 0);
+});
+
+test("timeout: a response body that hangs after the headers is also cut off", async () => {
+  const slowBody = (_url, init) => {
+    const resp = new Response("{}", { status: 200 });
+    resp.json = () => new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))));
+    return resp;
+  };
+  assert.deepEqual(await explain("t3", { settings: own(), store: fakeStore(), fetch: fakeFetch(slowBody), timeoutMs: 20 }), { ok: false, error: "network" });
+  assert.deepEqual(await explain("t3", { settings: free(), store: fakeStore(), fetch: fakeFetch(slowBody), freeUrl: FREE_URL_TEST, timeoutMs: 20 }), { ok: false, error: "free_unavailable" });
+});
+
+test("timeout: default is 30 s and a fast response clears the timer", async () => {
+  const f = fakeFetch(() => jsonResponse(200, chatPayload()));
+  const out = await run("t4", own(), f);
+  assert.equal(out.ok, true);
+  assert.equal(f.calls[0].init.signal.aborted, false);
+});
+
+test("cache read errors are a miss: the provider is still called", async () => {
+  const f = fakeFetch(() => jsonResponse(200, chatPayload()));
+  const store = { explanationKey: async () => { throw new Error("idb"); }, getExplanation: async () => { throw new Error("idb"); }, putExplanation: async () => { throw new Error("idb"); } };
+  assert.deepEqual(await run("c1", own(), f, store), { ok: true, result: GOOD, cached: false, remaining: null });
+  const store2 = { ...fakeStore(), getExplanation: async () => { throw new Error("idb"); } };
+  assert.equal((await run("c1", own(), f, store2)).ok, true);
+  assert.equal(f.calls.length, 2);
+});
+
+test("a failing cache write does not discard the result", async () => {
+  const f = fakeFetch(() => jsonResponse(200, { result: GOOD }, { "X-Free-Remaining": "3" }));
+  const store = { ...fakeStore(), putExplanation: async () => { throw new Error("quota"); } };
+  assert.deepEqual(await run("c2", free(), f, store), { ok: true, result: GOOD, cached: false, remaining: 3 });
+});
+
+test("explain never rejects, even on an unexpected error", async () => {
+  const bad = fakeFetch(() => ({ status: 200, ok: true, json: async () => { throw new Error("x"); } }));
+  const out = await run("c3", own(), bad);
+  assert.equal(out.ok, false);
+});
+
+test("concurrent calls for the same text share one request", async () => {
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const f = fakeFetch(async () => { await gate; return jsonResponse(200, chatPayload()); });
+  const store = fakeStore();
+  const a = run("d1", own(), f, store);
+  const b = run(" d1 ", own(), f, store);
+  await new Promise((r) => setTimeout(r, 10));
+  release();
+  const [ra, rb] = await Promise.all([a, b]);
+  assert.equal(f.calls.length, 1);
+  assert.equal(ra.ok, true);
+  assert.deepEqual(rb, ra);
+  const c = await run("d1", own(), f, store);
+  assert.equal(c.cached, true);
+  assert.equal(f.calls.length, 1);
+});
+
+test("in-flight entry is removed after a failure, so a retry fetches again", async () => {
+  const f = fakeFetch(() => jsonResponse(500, {}));
+  const store = fakeStore();
+  const [a, b] = await Promise.all([run("d2", own(), f, store), run("d2", own(), f, store)]);
+  assert.deepEqual(a, { ok: false, error: "bad_response" });
+  assert.deepEqual(b, a);
+  assert.equal(f.calls.length, 1);
+  await run("d2", own(), f, store);
+  assert.equal(f.calls.length, 2);
+});
