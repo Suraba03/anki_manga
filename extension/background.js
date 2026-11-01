@@ -1,5 +1,5 @@
-// Service worker: per-site activation, and (later tasks) image fetching + helper relay.
-import { call, ensurePaired } from "./lib/helper-client.js";
+// Service worker: per-site activation, and the relay between content scripts and the offscreen OCR engine.
+import { getSettings } from "./lib/settings.js";
 
 // Classic content scripts, loaded in this order into one isolated world.
 export const CONTENT_FILES = ["content/page-finder.js", "content/layout.js", "content/overlay.js", "content/status.js", "content/main.js"];
@@ -48,7 +48,6 @@ async function enableSite(origin, tabId) {
   if (tabId != null) {
     await chrome.scripting.executeScript({ target: { tabId }, files: CONTENT_FILES }).catch(() => {});
   }
-  await ensurePaired();
 }
 
 async function disableSite(origin, tabId) {
@@ -83,18 +82,10 @@ export async function engineCall(msg) {
   return chrome.runtime.sendMessage({ target: "offscreen", ...msg });
 }
 
-// Test hook: the e2e harness evaluates in the service-worker global scope, where module
-// exports are not reachable (dynamic import() is disallowed in service workers).
-Object.assign(globalThis, { ensureOffscreen, engineCall });
-
 // --- page pipeline ------------------------------------------------------------------
-const MIN_SIDE = 400;
-const MIN_LONG_SIDE = 600;
-// OCR results stream from the helper per displayed page. Chrome allows ~6 connections per
-// host, so cap streams and keep the rest of the slots for hover/click requests.
-const MAX_STREAMS = 3;
-const relaying = new Set(); // `${tabId}:${pageId}` streams open
-const streamQueue = []; // [tabId, pageId] waiting for a slot
+// The offscreen document fetches/decodes the image, detects bubbles and OCRs them; this side checks the
+// image-host permission and relays finished texts to the tabs that show the page.
+const watchers = new Map(); // pageId -> Set<tabId>; in-memory only, content scripts re-register on hover
 
 async function noteMissingHost(tabId, host) {
   const { missingHosts = {} } = await chrome.storage.session.get("missingHosts");
@@ -104,13 +95,13 @@ async function noteMissingHost(tabId, host) {
   await chrome.storage.session.set({ missingHosts });
 }
 
-async function postPage(bytes, contentType, imageUrl) {
-  const resp = await call(`/pages?url=${encodeURIComponent(imageUrl || "")}`, {
-    method: "POST",
-    body: bytes,
-    headers: { "Content-Type": contentType || "application/octet-stream" },
-  });
-  return resp.json();
+// "all": OCR every bubble as soon as the page is detected; "none": only bubbles the user hovers.
+async function ocrScope() {
+  const { perfMode } = await getSettings();
+  if (perfMode === "prefetch") return "all";
+  if (perfMode === "on-demand") return "none";
+  const { modelStatus } = await chrome.storage.session.get("modelStatus");
+  return modelStatus && modelStatus.mode === "on-demand" ? "none" : "all";
 }
 
 async function processImage(msg, sender) {
@@ -121,79 +112,28 @@ async function processImage(msg, sender) {
     await noteMissingHost(tabId, url.host);
     return { ok: false, error: "no_image_permission", host: url.host };
   }
-  let resp;
-  try {
-    resp = await fetch(msg.imageUrl, { credentials: "include" });
-  } catch {
-    return { ok: false, error: "fetch_failed" };
-  }
-  if (!resp.ok) return { ok: false, error: "fetch_failed" };
-  const blob = await resp.blob();
-  try {
-    const bmp = await createImageBitmap(blob);
-    const small = Math.min(bmp.width, bmp.height) < MIN_SIDE || Math.max(bmp.width, bmp.height) < MIN_LONG_SIDE;
-    bmp.close();
-    if (small) return { ok: false, error: "not_manga" };
-  } catch {
-    return { ok: false, error: "fetch_failed" };
-  }
-  return sendPage(await blob.arrayBuffer(), blob.type, msg.imageUrl, tabId);
+  return engineCall({ type: "eng:page", source: { url: msg.imageUrl }, ocr: await ocrScope() });
 }
 
-async function sendPage(bytes, contentType, imageUrl, tabId) {
-  let page;
-  try {
-    page = await postPage(bytes, contentType, imageUrl);
-  } catch (e) {
-    return { ok: false, error: e.error || "helper_unreachable" };
+export function relayText({ pageId, bubbleId, text }) {
+  for (const tabId of watchers.get(pageId) || []) {
+    chrome.tabs.sendMessage(tabId, { type: "am:bubble-text", pageId, bubbleId, text }).catch(() => {});
   }
-  return { ok: true, page };
 }
 
-// Stream OCR results from the helper's SSE endpoint to the tab.
 function watchPage(tabId, pageId) {
-  const key = `${tabId}:${pageId}`;
-  if (relaying.has(key) || streamQueue.some(([t, p]) => t === tabId && p === pageId)) return;
-  if (relaying.size >= MAX_STREAMS) {
-    streamQueue.push([tabId, pageId]);
-    return;
-  }
-  relayTexts(tabId, pageId);
+  if (!watchers.has(pageId)) watchers.set(pageId, new Set());
+  watchers.get(pageId).add(tabId);
 }
 
-// The helper replays texts already finished, then streams the rest, then ends.
-async function relayTexts(tabId, pageId) {
-  const key = `${tabId}:${pageId}`;
-  relaying.add(key);
-  try {
-    const resp = await call(`/pages/${pageId}/events`);
-    const reader = resp.body.pipeThrough(new TextDecoderStream()).getReader();
-    let buf = "";
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += value;
-      let cut;
-      while ((cut = buf.indexOf("\n\n")) >= 0) {
-        const frame = buf.slice(0, cut);
-        buf = buf.slice(cut + 2);
-        if (frame.startsWith("event: done")) return;
-        const data = frame.split("\n").find((l) => l.startsWith("data: "));
-        if (!data) continue;
-        const { bubble_id, text } = JSON.parse(data.slice(6));
-        chrome.tabs.sendMessage(tabId, { type: "am:bubble-text", pageId, bubbleId: bubble_id, text }).catch(() => {});
-      }
-    }
-  } catch {
-    /* helper or worker went away; hovering an empty bubble re-sends am:watch */
-  } finally {
-    relaying.delete(key);
-    const next = streamQueue.shift();
-    if (next) relayTexts(...next);
-  }
+// The PNG header holds the image width at bytes 16-19: no need to decode the screenshot here.
+function pngWidth(dataUrl) {
+  const start = dataUrl.indexOf(",") + 1;
+  const head = atob(dataUrl.slice(start, start + 32));
+  return ((head.charCodeAt(16) << 24) | (head.charCodeAt(17) << 16) | (head.charCodeAt(18) << 8) | head.charCodeAt(19)) >>> 0;
 }
 
-// Fallback for canvas pages / images we can't fetch: crop a screenshot of the element.
+// Fallback for canvas pages / images we can't fetch: the offscreen document crops a screenshot of the element.
 async function captureElement(msg, sender) {
   const tab = sender.tab;
   if (!tab) return { ok: false, error: "no_tab" };
@@ -206,16 +146,19 @@ async function captureElement(msg, sender) {
     await chrome.storage.session.set({ captureBlocked });
     return { ok: false, error: "capture_failed", detail: String(e.message || e) };
   }
-  const shot = await createImageBitmap(await (await fetch(dataUrl)).blob());
   const { x, y, width, height } = msg.rect;
-  const scale = shot.width / msg.viewportWidth; // device pixels per CSS pixel in the capture
-  const w = Math.round(width * scale);
-  const h = Math.round(height * scale);
-  const canvas = new OffscreenCanvas(w, h);
-  canvas.getContext("2d").drawImage(shot, Math.round(x * scale), Math.round(y * scale), w, h, 0, 0, w, h);
-  shot.close();
-  const blob = await canvas.convertToBlob({ type: "image/png" });
-  return sendPage(await blob.arrayBuffer(), "image/png", "", tab.id);
+  const scale = pngWidth(dataUrl) / msg.viewportWidth; // device pixels per CSS pixel in the capture
+  return engineCall({ type: "eng:page", source: { dataUrl, crop: { x, y, width, height, scale } }, ocr: await ocrScope() });
+}
+
+// A hovered bubble is OCR'd next. If its text is already known the engine says so in the reply, and the
+// hovering tab gets it directly (its watcher may have been lost in a worker restart).
+async function prioritize(msg, sender) {
+  const reply = await engineCall({ type: "eng:prioritize", pageId: msg.pageId, bubbleId: msg.bubbleId });
+  if (reply && reply.text != null && sender.tab) {
+    chrome.tabs.sendMessage(sender.tab.id, { type: "am:bubble-text", pageId: msg.pageId, bubbleId: msg.bubbleId, text: reply.text }).catch(() => {});
+  }
+  return { ok: !!(reply && reply.ok) };
 }
 
 async function select(msg, sender) {
@@ -228,6 +171,14 @@ async function select(msg, sender) {
   return { ok: true };
 }
 
+function fromEngine(fn) {
+  return async (msg, sender) => {
+    if (sender.tab) return { ok: false };
+    await fn(msg);
+    return { ok: true };
+  };
+}
+
 // Message router. Handlers return a promise; the response is sent when it settles.
 const handlers = {
   "am:enable-site": (msg) => enableSite(msg.origin, msg.tabId).then(() => ({ ok: true })),
@@ -238,10 +189,21 @@ const handlers = {
     if (sender.tab) watchPage(sender.tab.id, msg.pageId);
     return Promise.resolve({ ok: true });
   },
-  "am:prioritize": (msg) =>
-    call(`/pages/${msg.pageId}/bubbles/${msg.bubbleId}/prioritize`, { method: "POST" })
-      .then(() => ({ ok: true }))
-      .catch(() => ({ ok: false })),
+  "am:prioritize": prioritize,
+  "am:engine": (msg) => engineCall(msg.msg),
+  // Messages from the offscreen document (a content script must not be able to send these). The
+  // offscreen document has no chrome.storage, so the worker reads and writes it on the engine's behalf.
+  "eng:text": fromEngine(async (msg) => relayText(msg)),
+  "eng:model-status": fromEngine((msg) => chrome.storage.session.set({ modelStatus: msg.status })),
+  "eng:benchmark": fromEngine((msg) =>
+    msg.benchmark ? chrome.storage.local.set({ benchmark: msg.benchmark }) : chrome.storage.local.remove("benchmark"),
+  ),
+  // Development only: a local mirror of the model files. Unpacked extensions only; SHA-256 still applies.
+  "eng:dev-config": async (msg, sender) => {
+    if (sender.tab) return { ok: false };
+    const { devModelBase = null } = await chrome.storage.local.get("devModelBase");
+    return { devModelBase: chrome.runtime.getManifest().update_url ? null : devModelBase };
+  },
   "am:select": select,
   "am:status": async (msg, sender) => {
     if (!sender.tab) return { ok: false };
@@ -264,6 +226,7 @@ chrome.tabs.onUpdated.addListener((tabId, info) => {
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   forgetStatus(tabId);
+  for (const tabs of watchers.values()) tabs.delete(tabId);
   const { missingHosts = {} } = await chrome.storage.session.get("missingHosts");
   if (missingHosts[tabId]) {
     delete missingHosts[tabId];
@@ -279,5 +242,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     .catch((e) => sendResponse({ ok: false, error: e.error || String(e.message || e) }));
   return true;
 });
+
+// Test hook: the e2e harness evaluates in the service-worker global scope, where module
+// exports are not reachable (dynamic import() is disallowed in service workers).
+Object.assign(globalThis, { ensureOffscreen, engineCall, handlers });
 
 export { handlers };

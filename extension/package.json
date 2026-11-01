@@ -2,11 +2,13 @@
   "name": "anki-manga-extension",
   "private": true,
   "description": "Test runner for the pure content-script modules (the extension itself has no build step).",
+  "type": "module",
   "scripts": {
     "test": "node --test"
   },
   "license": "GPL-3.0-or-later",
   "devDependencies": {
+    "fake-indexeddb": "6.2.7",
     "jpeg-js": "0.4.4",
     "kuromoji": "0.1.2",
     "onnxruntime-node": "1.20.1"

@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 // End-to-end harness: launches Chrome for Testing with the unpacked extension and drives its
 // service worker over CDP.   node tools/e2e/run.mjs [--probe | --smoke]
+//   --smoke  end to end: serves the sample pages (ANKI_MANGA_SAMPLES) and the mirrored models (tools/.cache/mirror)
+//            on 127.0.0.1:47900, loads the first page in a tab and waits for the overlay to show its texts
 //   --probe  platform probe: offscreen document, WebGPU session, cross-origin fetch, AnkiConnect
 //            (the AnkiConnect probe runs only when ANKI_RUNNING=1)
 import { spawn, execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { createServer } from "node:http";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, existsSync, createReadStream, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +16,8 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const CACHE = join(ROOT, "tools/e2e/.cache");
 const EXTENSION = join(ROOT, "extension");
 const PORT = 9333;
+const SERVE_PORT = 47900;
+const MIRROR = join(ROOT, "tools/.cache/mirror");
 const PROBE_FETCH_URL = "https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-aarch64-1.20.1.tgz";
 
 const OUR_NAME = JSON.parse(readFileSync(join(EXTENSION, "manifest.json"), "utf8")).name;
@@ -122,6 +127,82 @@ async function probe(sw) {
   return !failed;
 }
 
+// Serves one sample page (as /page.jpg inside a plain HTML page) and the mirrored model files (/models/<name>).
+function startServer(image) {
+  const server = createServer((req, res) => {
+    const path = decodeURIComponent(req.url.split("?")[0]);
+    if (path === "/") {
+      res.setHeader("Content-Type", "text/html");
+      res.end('<!doctype html><body style="margin:0"><img src="/page.jpg" style="width:900px">');
+    } else if (path === "/page.jpg") {
+      res.setHeader("Content-Type", "image/jpeg");
+      createReadStream(image).pipe(res);
+    } else if (path.startsWith("/models/") && !path.includes("..") && existsSync(join(MIRROR, path.slice(8)))) {
+      const file = join(MIRROR, path.slice(8));
+      res.setHeader("Content-Length", statSync(file).size);
+      createReadStream(file).pipe(res);
+    } else {
+      res.statusCode = 404;
+      res.end();
+    }
+  });
+  return new Promise((resolve) => server.listen(SERVE_PORT, "127.0.0.1", () => resolve(server)));
+}
+
+async function smoke(sw) {
+  const samples = process.env.ANKI_MANGA_SAMPLES;
+  if (!samples) throw new Error("set ANKI_MANGA_SAMPLES to the folder with the sample pages and reference/*.json");
+  const image = readdirSync(samples).filter((f) => /\.(jpe?g|png)$/i.test(f)).sort()[0];
+  if (!image) throw new Error(`no sample page in ${samples}`);
+  const refFile = join(samples, "reference", `${image.replace(/\.[^.]+$/, "")}.json`);
+  const reference = existsSync(refFile) ? JSON.parse(readFileSync(refFile, "utf8")) : null;
+  const server = await startServer(join(samples, image));
+  const origin = `http://127.0.0.1:${SERVE_PORT}`;
+  let tab;
+  try {
+    await waitFor(() => sw.evaluate('typeof handlers === "object"'), "background.js to load");
+    await sw.evaluate(`chrome.storage.local.set({devModelBase: ${JSON.stringify(`${origin}/models/`)}})`);
+    // Force prefetch: the benchmark may pick on-demand OCR (e.g. software WebGPU in headless Chrome).
+    await sw.evaluate('chrome.storage.local.set({settings: {perfMode: "prefetch"}})');
+    await sw.evaluate(`handlers["am:enable-site"]({origin: ${JSON.stringify(origin)}}, {})`);
+
+    // Content scripts do not retry "models_*" yet, so wait until the engine is ready before opening the page.
+    const t0 = Date.now();
+    let lastLine = "";
+    await sw.evaluate("ensureOffscreen()");
+    const status = await waitFor(async () => {
+      const s = await sw.evaluate('chrome.storage.session.get("modelStatus").then((r) => r.modelStatus || null)');
+      const line = s && `${s.state} ${Math.round((s.progress || 0) * 100)}%${s.ep ? ` ep=${s.ep}` : ""}`;
+      if (line !== lastLine) console.log(`  ${((Date.now() - t0) / 1000).toFixed(0)}s model status: ${(lastLine = line)}`);
+      return s && (s.state === "ready" || s.state === "error") ? s : null; // waitFor swallows exceptions
+    }, "the engine to become ready", 300000);
+    if (status.state === "error") throw new Error(`engine failed to start: ${status.error}`);
+    console.log(`engine ready in ${((Date.now() - t0) / 1000).toFixed(1)}s  ep=${status.ep} mode=${status.mode}`);
+
+    const created = await (await fetch(`http://127.0.0.1:${PORT}/json/new?${origin}/`, { method: "PUT" })).json();
+    tab = await Cdp.open(created.webSocketDebuggerUrl);
+    const t1 = Date.now();
+    const snapshot = `JSON.stringify([...document.querySelectorAll(".am-bubble")].map((b) => [Number(b.dataset.amBubble), b.classList.contains("am-pending"), b.textContent]))`;
+    await waitFor(async () => JSON.parse(await tab.evaluate(snapshot)).length > 0, "bubbles to appear", 120000);
+    let bubbles;
+    await waitFor(async () => {
+      bubbles = JSON.parse(await tab.evaluate(snapshot));
+      return bubbles.filter((b) => !b[1]).length >= Math.ceil(bubbles.length * 0.8);
+    }, "80% of the bubbles to have text", 120000);
+    const done = bubbles.filter((b) => !b[1]);
+    console.log(`bubbles ${bubbles.length}, with text ${done.length}, in ${((Date.now() - t1) / 1000).toFixed(1)}s after the page opened`);
+    const want = new Map((reference?.bubbles || []).map((b) => [b.id, b.text_greedy]));
+    let same = 0;
+    for (const [id, , text] of done) if (want.get(id) === text) same++;
+    for (const [id, , text] of done.slice(0, 3)) console.log(`  #${id} ${JSON.stringify(text)}  reference ${JSON.stringify(want.get(id) ?? null)}`);
+    if (reference) console.log(`matching the reference text_greedy: ${same}/${done.length}`);
+    return done.length >= Math.ceil(bubbles.length * 0.8) && (!reference || same >= Math.ceil(done.length * 0.8));
+  } finally {
+    tab?.close();
+    server.close();
+  }
+}
+
 async function main() {
   const chromePath = installChrome();
   const profile = mkdtempSync(join(tmpdir(), "anki-manga-e2e-"));
@@ -142,7 +223,7 @@ async function main() {
   let sw;
   try {
     sw = await connectServiceWorker();
-    if (mode === "smoke") throw new Error("--smoke is not implemented yet (added with the OCR engine tasks)");
+    if (mode === "smoke") return (await smoke(sw)) ? 0 : 1;
     return (await probe(sw)) ? 0 : 1;
   } finally {
     sw?.close();
