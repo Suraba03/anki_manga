@@ -9,6 +9,7 @@ globalThis.chrome = {
   sidePanel: { setPanelBehavior: async () => {}, open: async () => {} },
   tabs: {
     onRemoved: listeners(),
+    onUpdated: listeners(),
     query: async ({ url }) => (url === "https://reader.example/*" ? [{ id: 7, url: "https://reader.example/ch1" }] : []),
   },
   permissions: { contains: async ({ origins }) => origins[0] !== "https://revoked.example/*" },

@@ -26,6 +26,7 @@
         white-space: nowrap !important; margin: 0 !important; padding: 0 !important; transform-origin: 0 0; }
       html.am-show .am-bubble { color: #c00 !important; background: rgba(255,255,255,.82) !important;
         outline: 1px solid #c00; }
+      .am-bubble.am-pending:hover { outline: 1px dashed rgba(178,106,0,.9) !important; }
       .am-bubble.am-flash { outline: 2px solid #f5a524 !important; background: rgba(245,165,36,.18) !important; }
     `;
     document.documentElement.appendChild(style);
@@ -39,10 +40,11 @@
     const bubbles = new Map(); // id -> {data, el}
     for (const b of page.bubbles) {
       const el = document.createElement("div");
-      el.className = "am-bubble" + (b.vertical ? " am-vertical" : "");
+      const received = b.text !== null && b.text !== undefined; // '' = OCR finished but found nothing
+      el.className = "am-bubble" + (b.vertical ? " am-vertical" : "") + (received ? "" : " am-pending");
       el.dataset.amBubble = String(b.id);
       layer.appendChild(el);
-      bubbles.set(b.id, { data: { ...b }, el });
+      bubbles.set(b.id, { data: { ...b }, el, received });
       el.addEventListener("mouseenter", () => opts.onHover(page.page_id, b.id, bubbles.get(b.id).data.text));
       el.addEventListener("mouseleave", () => opts.onLeave(page.page_id, b.id));
       el.addEventListener("click", (ev) => {
@@ -104,7 +106,10 @@
 
     function setText(bubbleId, text) {
       const entry = bubbles.get(bubbleId);
-      if (!entry || entry.data.text === text) return;
+      if (!entry) return;
+      entry.received = true;
+      entry.el.classList.remove("am-pending");
+      if (entry.data.text === text) return;
       entry.data.text = text;
       const r = img.getBoundingClientRect();
       if (r.width >= 2) renderBubble(entry, { w: r.width, h: r.height });
@@ -115,12 +120,18 @@
       return !!(entry && entry.data.text);
     }
 
+    function progress() {
+      let done = 0;
+      for (const e of bubbles.values()) if (e.received) done++;
+      return { done, total: bubbles.size };
+    }
+
     function destroy() {
       layer.remove();
     }
 
     update(true);
-    return { update, setText, hasText, destroy, pageId: page.page_id, img };
+    return { update, setText, hasText, progress, destroy, pageId: page.page_id, img };
   }
 
   function flash(el) {

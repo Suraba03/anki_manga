@@ -92,8 +92,20 @@ async function refreshSite() {
   $("site-toggle").textContent = enabled ? "Disable on this site" : "Enable on this site";
   $("site-toggle").dataset.enabled = enabled ? "1" : "";
   await renderHostRequests();
+  await renderPageStatus(enabled);
   await loadDecks();
 }
+
+async function renderPageStatus(enabled = !!$("site-toggle").dataset.enabled) {
+  const el = $("page-status");
+  const { pageStatus = {} } = await chrome.storage.session.get("pageStatus");
+  const summary = state.tabId != null && pageStatus[state.tabId];
+  el.hidden = !enabled;
+  if (!enabled) return;
+  el.textContent = summary ? globalThis.AnkiManga.Status.summaryText(summary) : "Waiting for the page… (reload the tab if this stays)";
+  if (!summary && state.tabId != null) chrome.tabs.sendMessage(state.tabId, { type: "am:status-request" }).catch(() => {});
+}
+
 
 // Images often come from a CDN host; asking for it needs a click (user gesture).
 async function renderHostRequests() {
@@ -137,6 +149,7 @@ async function renderHostRequests() {
 
 chrome.storage.session.onChanged.addListener((changes) => {
   if (changes.missingHosts || changes.captureBlocked) renderHostRequests();
+  if (changes.pageStatus) renderPageStatus();
 });
 
 $("site-toggle").addEventListener("click", async () => {

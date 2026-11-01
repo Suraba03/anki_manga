@@ -2,7 +2,7 @@
 import { call, ensurePaired } from "./lib/helper-client.js";
 
 // Classic content scripts, loaded in this order into one isolated world.
-export const CONTENT_FILES = ["content/page-finder.js", "content/layout.js", "content/overlay.js", "content/main.js"];
+export const CONTENT_FILES = ["content/page-finder.js", "content/layout.js", "content/overlay.js", "content/status.js", "content/main.js"];
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
@@ -215,9 +215,27 @@ const handlers = {
       .then(() => ({ ok: true }))
       .catch(() => ({ ok: false })),
   "am:select": select,
+  "am:status": async (msg, sender) => {
+    if (!sender.tab) return { ok: false };
+    const { pageStatus = {} } = await chrome.storage.session.get("pageStatus");
+    pageStatus[sender.tab.id] = msg.summary;
+    await chrome.storage.session.set({ pageStatus });
+    return { ok: true };
+  },
 };
 
+async function forgetStatus(tabId) {
+  const { pageStatus = {} } = await chrome.storage.session.get("pageStatus");
+  if (!(tabId in pageStatus)) return;
+  delete pageStatus[tabId];
+  await chrome.storage.session.set({ pageStatus });
+}
+chrome.tabs.onUpdated.addListener((tabId, info) => {
+  if (info.status === "loading") forgetStatus(tabId);
+});
+
 chrome.tabs.onRemoved.addListener(async (tabId) => {
+  forgetStatus(tabId);
   const { missingHosts = {} } = await chrome.storage.session.get("missingHosts");
   if (missingHosts[tabId]) {
     delete missingHosts[tabId];

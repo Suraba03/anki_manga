@@ -3,12 +3,12 @@
 (() => {
   if (globalThis.__ankiMangaLoaded) return;
   globalThis.__ankiMangaLoaded = true;
-  const { PageFinder, Overlay } = globalThis.AnkiManga;
+  const { PageFinder, Overlay, Status } = globalThis.AnkiManga;
 
   // After the extension is reloaded, the copy that was running in this tab is cut off from it
   // (its layers stay in the DOM but can't reach the helper). Drop those layers; this copy
   // re-creates them from the helper's cache.
-  document.querySelectorAll(".am-layer").forEach((n) => n.remove());
+  document.querySelectorAll(".am-layer, .am-badge").forEach((n) => n.remove());
 
   const RETRY_DELAYS = [2000, 4000, 8000];
   const RETRY_LATER = 15000;
@@ -22,6 +22,40 @@
 
   function send(msg) {
     return chrome.runtime.sendMessage(msg).catch(() => ({ ok: false, error: "extension_reloaded" }));
+  }
+
+  // --- progress badges + panel summary ----------------------------------------------------
+  const badges = new Map(); // page element -> badge
+
+  function setState(el, state) {
+    let b = badges.get(el);
+    if (!b) {
+      if (!state) return;
+      b = Status.attachBadge(el);
+      badges.set(el, b);
+    }
+    b.set(state);
+    reportSoon();
+  }
+
+  function showProgress(handle) {
+    setState(handle.img, { phase: "ocr", ...handle.progress() });
+  }
+
+  let reportTimer = null;
+  function reportSoon() {
+    if (reportTimer) return;
+    reportTimer = setTimeout(() => {
+      reportTimer = null;
+      const states = [];
+      for (const [el, b] of badges) {
+        if (!el.isConnected) {
+          b.destroy();
+          badges.delete(el);
+        } else states.push(b.state);
+      }
+      send({ type: "am:status", summary: Status.summary(states) });
+    }, 300);
   }
 
   // --- overlays ---------------------------------------------------------------------
@@ -50,6 +84,7 @@
     list.push(handle);
     byPage.set(page.page_id, list);
     for (const b of page.bubbles) if (b.text) handle.setText(b.id, b.text);
+    showProgress(handle);
     if (page.bubbles.some((b) => !b.text)) send({ type: "am:watch", pageId: page.page_id });
   }
 
@@ -61,6 +96,7 @@
     const current = byImg.get(img);
     if (current && current.key === key && attempt === 0) return;
     byImg.set(img, { key, handle: null });
+    if (!results.has(key) || attempt > 0) setState(img, { phase: "detecting" });
 
     let pending = results.get(key);
     if (!pending || attempt > 0) {
@@ -76,6 +112,7 @@
       return;
     }
     const error = res && res.error;
+    setState(img, { phase: "error", error });
     if (RETRYABLE.has(error)) {
       byImg.delete(img);
       const delay = RETRY_DELAYS[attempt] ?? RETRY_LATER;
@@ -141,6 +178,7 @@
         if (url && cur && cur.key !== PageFinder.pageKey(url)) {
           // one-page readers swap src to the next page
           if (cur.handle) cur.handle.destroy();
+          setState(img, null);
           byImg.delete(img);
           io.unobserve(img);
           img.__amWatched = false;
@@ -188,6 +226,7 @@
         if (PageFinder.visibleFraction(r, vp) < CAPTURE_MIN_VISIBLE) continue;
         capturePending.delete(el);
         captured.add(el);
+        setState(el, { phase: "detecting" });
         const res = await send({
           type: "am:capture",
           rect: { x: r.left, y: r.top, width: r.width, height: r.height },
@@ -196,7 +235,10 @@
         if (res && res.ok) {
           const key = `capture:${res.page.page_id}`;
           if (!byImg.get(el) || !byImg.get(el).handle) showPage(el, key, res.page);
-        } else if (res && RETRYABLE.has(res.error)) {
+          continue;
+        }
+        setState(el, { phase: "error", error: res && res.error });
+        if (res && RETRYABLE.has(res.error)) {
           captured.delete(el);
           setTimeout(() => queueCapture(el), RETRY_LATER);
         } else if (res && res.error === "capture_failed") {
@@ -230,6 +272,7 @@
     requestAnimationFrame(() => {
       rafPending = false;
       for (const { handle } of byImg.values()) if (handle) handle.update();
+      for (const b of badges.values()) b.update();
     });
   }
   window.addEventListener("resize", updateAll, { passive: true });
@@ -255,7 +298,10 @@
 
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.type === "am:bubble-text") {
-      for (const h of byPage.get(msg.pageId) || []) h.setText(msg.bubbleId, msg.text);
+      for (const h of byPage.get(msg.pageId) || []) {
+        h.setText(msg.bubbleId, msg.text);
+        showProgress(h);
+      }
     } else if (msg.type === "am:retry") {
       for (const img of [...waitingPermission]) processImage(img);
       for (const el of [...captureBlocked]) {
@@ -265,5 +311,11 @@
     }
   });
 
+  // The panel asks for a fresh summary when it opens or switches tabs.
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg.type === "am:status-request") reportSoon();
+  });
+
   scan();
+  reportSoon();
 })();

@@ -25,3 +25,9 @@ Reference site: the owner's scroll-style raw reader (see design conversation; no
 
 ## Fallback (Task 17)
 - [ ] 11. A page that draws a manga page into a `<canvas>` (enabled like a site): `Alt+V` shows aligned text.
+
+## Status (after v1 review)
+- [ ] 12. Reload the extension (↻) and then the manga tab: the site still works; there are no duplicate layers.
+- [ ] 13. Each page shows a corner badge: `⏳ finding bubbles…` → `⏳ 4/11` → `✓ 11`, which fades. With the helper stopped it shows `⚠ helper not running` and stays.
+- [ ] 14. Hovering a bubble that hasn't been recognized yet shows a dashed outline.
+- [ ] 15. The panel shows `Pages: N ready · M recognizing` under the site name.
