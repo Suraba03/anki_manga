@@ -149,6 +149,80 @@ function startServer(image) {
   return new Promise((resolve) => server.listen(SERVE_PORT, "127.0.0.1", () => resolve(server)));
 }
 
+// A stand-in for AnkiConnect (the real one is Anki's add-on): records the notes it is asked to add. It listens on
+// its own port and the panel page is pointed at it, so a running Anki is never touched by the test.
+const FAKE_ANKI_PORT = 8766;
+function startFakeAnki() {
+  const notes = [];
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (d) => (body += d));
+    req.on("end", () => {
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Access-Control-Allow-Headers", "*");
+      if (req.method !== "POST") return res.end();
+      const { action, params } = JSON.parse(body);
+      const results = {
+        requestPermission: { permission: "granted", requireApikey: false, version: 6 },
+        deckNames: ["Default", "manga mining"],
+        modelNames: ["Manga Mining (anki_manga)"],
+        findNotes: [],
+        notesInfo: [],
+      };
+      if (action === "addNote") notes.push(params.note);
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ result: action === "addNote" ? 1 : (results[action] ?? null), error: null }));
+    });
+  });
+  return new Promise((resolve) => {
+    server.on("error", () => resolve(null));
+    server.listen(FAKE_ANKI_PORT, "127.0.0.1", () => resolve({ server, notes }));
+  });
+}
+
+// The side panel page itself: model status, a selected bubble (as the content script's click sends it), the free-tier
+// message (the free server is not deployed, so "unavailable" is the expected answer), and a dictionary entry on a word click.
+async function panelCheck(sw, ref) {
+  const id = await sw.evaluate("chrome.runtime.id");
+  // A tab is not the side panel: the service worker refuses "am:engine" from a tab sender, so here the page sends
+  // the engine message straight to the offscreen document (the worker only forwards it).
+  const created = await (await fetch(`http://127.0.0.1:${PORT}/json/new?about:blank`, { method: "PUT" })).json();
+  const panel = await Cdp.open(created.webSocketDebuggerUrl);
+  const anki = await startFakeAnki();
+  if (!anki) throw new Error(`port ${FAKE_ANKI_PORT} is busy`);
+  try {
+    await panel.send("Page.enable");
+    await panel.send("Page.addScriptToEvaluateOnNewDocument", {
+      source: `{ const send = chrome.runtime.sendMessage.bind(chrome.runtime);
+        chrome.runtime.sendMessage = (m, ...rest) => send(m && m.type === "am:engine" ? { target: "offscreen", ...m.msg } : m, ...rest);
+        const get = window.fetch.bind(window);
+        window.fetch = (u, ...rest) => get(String(u).replace("127.0.0.1:8765", "127.0.0.1:${FAKE_ANKI_PORT}"), ...rest); }`,
+    });
+    await panel.send("Page.navigate", { url: `chrome-extension://${id}/panel/panel.html` });
+    const text = (sel) => panel.evaluate(`document.querySelector(${JSON.stringify(sel)})?.textContent ?? ""`);
+    await waitFor(async () => (await text("#status")).startsWith("Ready"), "the panel to show the model status", 20000);
+    console.log(`panel status: ${await text("#status")}`);
+    await sw.evaluate(`handlers["am:select"](${JSON.stringify({ type: "am:select", ...ref, pageUrl: "http://example.invalid/ch1", pageTitle: "Chapter 1" })}, {})`);
+    await waitFor(async () => (await panel.evaluate('document.querySelectorAll(".entry .tok").length')) > 0, "the clickable sentence", 20000);
+    await waitFor(async () => (await text(".entry .msg")) !== "", "the explanation answer", 20000);
+    const msg = await text(".entry .msg");
+    console.log(`panel message: ${msg}`);
+    await panel.evaluate('document.querySelector(".entry .tok").click()');
+    await waitFor(async () => (await panel.evaluate('document.querySelectorAll(".entry .dict-entry").length')) > 0, "the dictionary entry", 20000);
+    console.log(`panel dictionary: ${(await text(".entry .dict-entry")).replace(/\s+/g, " ").slice(0, 120)}`);
+    await panel.evaluate('document.querySelector(".entry .dict-entry button").click()');
+    await waitFor(async () => (await panel.evaluate('document.querySelector(".entry .dict-entry button").textContent')) === "✓ added", "the card to be added", 20000);
+    const note = anki.notes[0];
+    const pic = note.picture?.[0];
+    console.log(`panel card: deck=${note.deckName} Word=${note.fields.Word} Reading=${note.fields.Reading} picture=${pic?.filename} (${pic?.data.length} base64 chars)`);
+    const cardOk = note.deckName === "manga mining" && !!note.fields.Word && /^anki_manga_[0-9a-f]{12}_\d+\.jpg$/.test(pic?.filename) && pic.data.length > 1000;
+    return cardOk && msg.includes("free explanation service is unavailable");
+  } finally {
+    anki.server.close();
+    panel.close();
+  }
+}
+
 async function smoke(sw) {
   const samples = process.env.ANKI_MANGA_SAMPLES;
   if (!samples) throw new Error("set ANKI_MANGA_SAMPLES to the folder with the sample pages and reference/*.json");
@@ -209,6 +283,27 @@ async function smoke(sw) {
       const bytes = crop.ok ? Buffer.from(crop.jpegBase64, "base64") : null;
       console.log(`eng:crop #${target.id} ok=${crop.ok} bytes=${bytes?.length ?? crop.error}`);
       extras = bub.ok && bub.tokens.length > 0 && bub.rubyHtml.length > 0 && !!bytes && bytes[0] === 0xff && bytes[1] === 0xd8;
+      // Dictionary: the first token with an entry (the first lookup downloads and parses the dictionary).
+      const t2 = Date.now();
+      let found = null;
+      for (const t of bub.tokens.filter((t) => t.pos !== "記号")) {
+        const look = await engine({ type: "eng:lookup", surface: t.surface, lemma: t.lemma, reading: t.reading });
+        if (!look.ok) {
+          console.log(`eng:lookup ${t.surface} failed: ${look.error}`);
+          break;
+        }
+        if (look.entries.length) {
+          found = { token: t, entry: look.entries[0] };
+          break;
+        }
+      }
+      console.log(
+        found
+          ? `eng:lookup ${found.token.surface} (${found.token.lemma}) -> ${found.entry.kanji[0] ?? found.entry.kana[0]}: ${found.entry.senses[0].glosses[0]}  (${((Date.now() - t2) / 1000).toFixed(1)}s)`
+          : "eng:lookup found no entry",
+      );
+      extras &&= !!found;
+      extras &&= await panelCheck(sw, ref);
     } else console.log("eng:bubble / eng:crop not checked: no bubble with text");
     return extras && done.length >= Math.ceil(bubbles.length * 0.8) && (!reference || same >= Math.ceil(done.length * 0.8));
   } finally {

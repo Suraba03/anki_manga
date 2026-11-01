@@ -101,6 +101,20 @@
         }
       }
     },
-    "data": {}
+    "data": {
+      "dict": {
+        "name": "jmdict-eng.min.json.gz",
+        "url": "https://github.com/Suraba03/anki_manga/releases/download/models-1/jmdict-eng.min.json.gz",
+        "sha256": "b5c091578df1651f488ca5d81c59aa04787a96c4a30db62a44e95d0e91cecc69",
+        "bytes": 11135910,
+        "source": {
+          "repo": "scriptin/jmdict-simplified",
+          "release": "3.6.2+20261026175559",
+          "asset": "jmdict-eng-3.6.2+20261026175559.json.zip",
+          "version": "3.6.2",
+          "license": "CC BY-SA 4.0 (JMdict, EDRDG)"
+        }
+      }
+    }
   }
 }

@@ -4,7 +4,7 @@
 //   node tools/mirror-models.mjs            download + hash + write the manifest (publishes nothing)
 //   node tools/mirror-models.mjs --upload   also `gh release create models-1 ...`  (PUBLISHES: owner approval first)
 import { createHash } from "node:crypto";
-import { copyFileSync, createReadStream, createWriteStream, existsSync, mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, createReadStream, readFileSync, createWriteStream, existsSync, mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
@@ -73,7 +73,8 @@ async function main() {
   }
 
   const done = new Map(); // name -> manifest entry (vocab.txt is shared by both sets)
-  const sets = { webgpu: {}, wasm: {}, data: {} };
+  // sets.data (the dictionary) is written by tools/build-dict.mjs: keep what is there.
+  const sets = { webgpu: {}, wasm: {}, data: existsSync(MANIFEST) ? JSON.parse(readFileSync(MANIFEST, "utf8")).sets?.data || {} : {} };
   for (const [setName, slots] of Object.entries(PLAN)) {
     for (const [slot, spec] of Object.entries(slots)) {
       const name = spec.path.split("/").pop();
@@ -116,6 +117,7 @@ async function main() {
   writeFileSync(MANIFEST, JSON.stringify(manifest, null, 2) + "\n");
   console.log(`wrote ${MANIFEST}`);
   for (const [setName, slots] of Object.entries(sets)) {
+    if (!Object.keys(slots).length) continue;
     const total = Object.values(slots).reduce((n, f) => n + f.bytes, 0);
     console.log(`set ${setName}: ${total} bytes`);
   }
@@ -124,9 +126,13 @@ async function main() {
     const notes =
       "Model files mirrored unchanged from Hugging Face for the anki_manga extension (SHA-256 pinned in " +
       "extension/engine/models.manifest.json). Licences: comic-text-detector*.onnx GPL-3.0 (dmMaze/comic-text-detector); " +
-      "encoder_model_*.onnx, decoder_model*.onnx, vocab.txt Apache-2.0 (kha-white/manga-ocr). Sources and revisions: " +
+      "encoder_model_*.onnx, decoder_model*.onnx, vocab.txt Apache-2.0 (kha-white/manga-ocr); jmdict-eng.min.json.gz CC BY-SA 4.0 " +
+      "(JMdict, EDRDG; compacted from scriptin/jmdict-simplified by tools/build-dict.mjs). Sources and revisions: " +
       [...done.values()].map((f) => `${f.name} = ${f.source.repo}@${f.source.revision.slice(0, 12)}/${f.source.path}`).join("; ");
-    const args = ["release", "create", TAG, "--notes", notes, ...[...done.keys()].map((n) => join(MIRROR, n))];
+    // Every manifest file that is in the mirror folder: the models and, once build-dict.mjs has run, the dictionary.
+    const names = new Set([...done.keys(), ...Object.values(sets.data).map((f) => f.name)]);
+    const files = [...names].filter((n) => existsSync(join(MIRROR, n))).map((n) => join(MIRROR, n));
+    const args = ["release", "create", TAG, "--notes", notes, ...files];
     const r = spawnSync("gh", args, { stdio: "inherit" });
     if (r.status !== 0) process.exit(r.status ?? 1);
   } else {

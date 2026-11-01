@@ -3,31 +3,76 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>anki_manga</title>
+  <title>Manga Mining</title>
   <link rel="stylesheet" href="panel.css">
 </head>
 <body>
   <header class="top">
-    <span class="brand">anki_manga</span>
-    <span id="status" class="status" data-state="unknown">Connecting…</span>
+    <span class="brand">Manga Mining</span>
+    <span class="status-wrap">
+      <span id="status" class="status" data-state="unknown">Starting…</span>
+      <button id="status-retry" class="btn" type="button" hidden></button>
+    </span>
   </header>
 
-  <div id="banner" class="banner" hidden></div>
-
   <details id="settings" class="settings">
-    <summary>⚙ Settings — API key &amp; deck</summary>
-    <label class="field">DeepSeek API key
-      <span class="row">
-        <input id="api-key" type="password" autocomplete="off" placeholder="sk-…">
-        <button id="save-key" class="btn" type="button">Save</button>
-      </span>
-      <span id="key-state" class="hint"></span>
-    </label>
-    <label class="field">Deck for this site
+    <summary>⚙ Settings</summary>
+
+    <label class="field">Anki deck for this site
       <select id="deck"></select>
       <span id="deck-state" class="hint"></span>
     </label>
+
+    <fieldset class="field">
+      <legend>Explanations</legend>
+      <label class="choice"><input type="radio" name="llm-mode" value="free"> Free</label>
+      <span id="free-left" class="hint"></span>
+      <label class="choice"><input type="radio" name="llm-mode" value="own"> Use my own API key</label>
+      <div id="own-key" hidden>
+        <label class="field">Provider
+          <select id="provider">
+            <option value="deepseek">DeepSeek</option>
+            <option value="custom">Custom (OpenAI-compatible)</option>
+          </select>
+        </label>
+        <label class="field">API key
+          <input id="api-key" type="password" autocomplete="off" placeholder="sk-…">
+        </label>
+        <label class="field" id="base-url-field" hidden>Base URL
+          <input id="base-url" type="url" autocomplete="off" placeholder="https://api.example.com/v1">
+        </label>
+        <label class="field">Model <span class="hint">(optional)</span>
+          <input id="model" type="text" autocomplete="off" placeholder="deepseek-flash">
+        </label>
+        <button id="save-own" class="btn" type="button">Save</button>
+        <span id="own-state" class="hint"></span>
+      </div>
+      <p class="hint">Only the text of the bubble you click is sent. Page images never leave your computer.</p>
+    </fieldset>
+
+    <label class="field">Text recognition
+      <select id="perf">
+        <option value="auto">Auto</option>
+        <option value="prefetch">Prefetch (read every bubble in advance)</option>
+        <option value="on-demand">On demand (read a bubble when you hover it)</option>
+      </select>
+    </label>
+
+    <div class="field">
+      <button id="clear-models" class="btn" type="button">Delete downloaded models and caches</button>
+      <span id="clear-state" class="hint"></span>
+    </div>
+
     <p class="hint">Show the hidden text layer on a page: <kbd>Alt</kbd>+<kbd>V</kbd>.</p>
+
+    <h5>About</h5>
+    <ul class="about">
+      <li>comic-text-detector (GPL-3.0)</li>
+      <li>manga-ocr (Apache-2.0)</li>
+      <li>JMdict (CC BY-SA 4.0)</li>
+      <li>kuromoji (Apache-2.0)</li>
+    </ul>
+    <p class="hint"><a href="https://suraba03.github.io/anki_manga/privacy" target="_blank" rel="noopener">Privacy policy</a></p>
   </details>
 
   <section class="site">
@@ -38,14 +83,14 @@
   <div id="host-requests"></div>
 
   <main id="entries">
-    <p id="empty" class="empty">Shift-hover a bubble for Yomitan. <b>Click</b> a bubble (or press <kbd>Alt</kbd>+<kbd>E</kbd> over it) to explain it here.</p>
+    <p id="empty" class="empty">Shift-hover a bubble for Yomitan. <b>Click</b> a bubble (or press <kbd>Alt</kbd>+<kbd>E</kbd> over it) to explain it here. Click a word in the sentence for its dictionary entry.</p>
   </main>
-
 
   <template id="entry-tpl">
     <article class="entry">
       <h5>Bubble</h5>
       <div class="jp"></div>
+      <div class="dict" hidden></div>
       <div class="tr"></div>
       <div class="explain">
         <h5>Why it's written this way</h5>
@@ -54,6 +99,7 @@
         <div class="cards"></div>
       </div>
       <div class="msg" hidden></div>
+      <button class="btn own-key-btn" type="button" hidden>Add your own API key</button>
     </article>
   </template>
 

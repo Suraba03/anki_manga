@@ -9,6 +9,7 @@ import { OcrScheduler } from "../engine/scheduler.js";
 import { createTokenizer } from "../lib/tokenizer.js";
 import { bubbleReply } from "../engine/bubble.js";
 import { findPanelBox, cropJpeg } from "../engine/panel-crop.js";
+import { Dictionary } from "../lib/dictionary.js";
 
 configureOrt(ort);
 
@@ -88,12 +89,23 @@ async function onText(pageId, bubbleId, text, persist) {
 }
 const scheduler = new OcrScheduler((rgba, bubble) => engine.ocr(rgba, bubble), onText);
 
+let manifestLoad = null;
+function loadManifest() {
+  manifestLoad ||= fetch(chrome.runtime.getURL("engine/models.manifest.json"))
+    .then((r) => r.json())
+    .catch((e) => {
+      manifestLoad = null; // a failed read can be retried
+      throw e;
+    });
+  return manifestLoad;
+}
+
 function boot() {
   booting ||= (async () => {
     setStatus({ state: "downloading", progress: 0 });
     try {
       store ||= await openStore(indexedDB);
-      const manifest = await (await fetch(chrome.runtime.getURL("engine/models.manifest.json"))).json();
+      const manifest = await loadManifest();
       const adapter = navigator.gpu ? await navigator.gpu.requestAdapter().catch(() => null) : null;
       const started = await startEngine({
         ort,
@@ -266,6 +278,50 @@ async function engineCrop(msg) {
   return { ok: true, jpegBase64: await cropJpeg(rgba, findPanelBox(rgba, bubble.box)) };
 }
 
+// The dictionary is data in the same pinned, verified download path as the models, fetched on the first
+// lookup (OCR start-up never waits for it) and dropped again after a few idle minutes: parsed it is ~200 MB.
+const DICT_IDLE_MS = 3 * 60 * 1000;
+let dict = null;
+let dictLoad = null;
+let dictIdle = null;
+
+async function loadDict() {
+  const file = buildModelSets(await loadManifest()).data.dict;
+  if (!file) throw new Error("no dictionary in the manifest");
+  const bytes = (await ensure({ dict: file })).get(file.name);
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+  return Dictionary.fromJson(JSON.parse(await new Response(stream).text()));
+}
+
+function dropDict() {
+  clearTimeout(dictIdle);
+  dict = null;
+}
+
+async function engineLookup({ surface, lemma, reading }) {
+  try {
+    dictLoad ||= loadDict().finally(() => {
+      dictLoad = null;
+    });
+    dict ||= await dictLoad;
+  } catch (e) {
+    console.error("dictionary load failed", e);
+    return { ok: false, error: "dict_unavailable" };
+  }
+  clearTimeout(dictIdle);
+  dictIdle = setTimeout(dropDict, DICT_IDLE_MS);
+  const entries = dict.lookup({ surface, lemma, reading });
+  const tags = {};
+  for (const e of entries) for (const s of e.senses) for (const p of s.pos) if (dict.tags[p]) tags[p] = dict.tags[p];
+  return { ok: true, entries, tags };
+}
+
+// The panel's Retry: the engine is started again after a failure (or after "delete models").
+async function engineRetry() {
+  if (status.state === "error") boot();
+  return { ok: true };
+}
+
 async function engineClear() {
   store ||= await openStore(indexedDB);
   // Queued jobs are dropped and the running one is awaited and discarded before the engine goes away.
@@ -276,6 +332,7 @@ async function engineClear() {
   decoded.clear();
   await clearModels(await caches.open(MODEL_CACHE));
   await store.clear();
+  dropDict();
   await toWorker({ type: "eng:benchmark", benchmark: null });
   setStatus({ state: "error", progress: 0, error: "models_cleared" });
   return { ok: true };
@@ -289,6 +346,8 @@ const handlers = {
   "eng:prioritize": enginePrioritize,
   "eng:bubble": engineBubble,
   "eng:crop": engineCrop,
+  "eng:lookup": engineLookup,
+  "eng:retry": engineRetry,
   "eng:status": async () => ({ ok: true, ...status }),
   "eng:clear": engineClear,
 };
