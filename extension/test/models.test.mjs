@@ -120,21 +120,27 @@ for (const file of pages) {
     const t1 = Date.now();
     assert.equal(bubbles.length, ref.bubbles.length, `bubble count ${bubbles.length} vs ${ref.bubbles.length}`);
 
-    let equal = 0;
-    const diffs = [];
+    // The browser decodes greedily, so faithfulness is judged against the PyTorch model decoded greedily
+    // (text_greedy); the helper's beam-search text (num_beams 4, no_repeat_ngram_size 3) is informational only.
+    let equal = 0, beamEqual = 0;
+    const diffs = [], beamDiffs = [];
     for (let i = 0; i < bubbles.length; i++) {
       const text = await ocrBubble(eng.runEncoder, eng.runDecoder, eng.vocab, rgba, bubbles[i]);
-      const want = ref.bubbles[i].text;
-      if (text.normalize("NFKC") === want.normalize("NFKC")) equal++;
-      else diffs.push(`  #${i} js=${JSON.stringify(text)} helper=${JSON.stringify(want)}`);
+      const nfkc = (v) => v.normalize("NFKC");
+      const want = ref.bubbles[i].text_greedy;
+      assert.equal(typeof want, "string", "reference lacks text_greedy; rerun tools/make-reference.py");
+      if (nfkc(text) === nfkc(want)) equal++;
+      else diffs.push(`  #${i} js=${JSON.stringify(text)} greedy=${JSON.stringify(want)}`);
+      if (nfkc(text) === nfkc(ref.bubbles[i].text)) beamEqual++;
+      else beamDiffs.push(`  #${i} js=${JSON.stringify(text)} helper-beam=${JSON.stringify(ref.bubbles[i].text)}`);
     }
     const t2 = Date.now();
     const pct = (100 * equal) / bubbles.length;
     t.diagnostic(
       `${file}: nms ${nms.length}/${ref.nms.length}, lines ${lines.length}/${ref.lines.length}, bubbles ${bubbles.length}/${ref.bubbles.length}, ` +
-        `text ${equal}/${bubbles.length} (${pct.toFixed(1)}%) [${webgpuSet ? "webgpu set" : "cpu set"}], detect ${t1 - t0} ms, ocr ${t2 - t1} ms`,
+        `text vs greedy ${equal}/${bubbles.length} (${pct.toFixed(1)}%), vs helper beam ${beamEqual}/${bubbles.length} [${webgpuSet ? "webgpu set" : "cpu set"}], detect ${t1 - t0} ms, ocr ${t2 - t1} ms`,
     );
-    if (diffs.length) console.log(`differing texts in ${file}:\n${diffs.join("\n")}`);
-    assert.ok(pct >= 90, `text equality ${pct.toFixed(1)}% < 90%\n${diffs.join("\n")}`);
+    if (beamDiffs.length) console.log(`texts differing from the helper's beam search in ${file} (informational):\n${beamDiffs.join("\n")}`);
+    assert.ok(pct >= 90, `text equality vs greedy reference ${pct.toFixed(1)}% < 90%\n${diffs.join("\n")}`);
   });
 }

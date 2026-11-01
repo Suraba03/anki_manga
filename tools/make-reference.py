@@ -1,7 +1,8 @@
 """Write v1-helper reference output for the model acceptance test (extension/test/models.test.mjs).
 
 For every *.jpg in the samples folder, writes <folder>/reference/<name>.json with
-  bubbles: the helper Engine's final bubbles (Bubble.to_json + OCR text),
+  bubbles: the helper Engine's final bubbles (Bubble.to_json + OCR text = the helper's beam search, and
+           text_greedy = the same PyTorch model decoded greedily, which is what the browser does),
   nms:     the raw postprocess_yolo blocks (xyxy int32 image coords, cls, conf),
   lines:   the DBNet quads handed to group_output (after box_thresh 0.6, image coords, int32).
 
@@ -14,8 +15,26 @@ import sys
 from pathlib import Path
 
 import comic_text_detector.inference as inf
+import torch
+from PIL import Image
+from manga_ocr.ocr import post_process
 from anki_manga_helper.boxes import Bubble
 from anki_manga_helper.engine import Engine, decode_image
+
+
+def ocr_greedy(engine: Engine, img, bubble: Bubble) -> str:
+    """Engine.ocr with the same crop and post_process, but num_beams=1 and no n-gram blocking (HF default beams: 4, 3)."""
+    h, w = img.shape[:2]
+    x1, y1, x2, y2 = bubble.box
+    pad = 4  # engine.OCR_PAD
+    crop = img[max(0, int(y1) - pad) : min(h, int(y2) + pad), max(0, int(x1) - pad) : min(w, int(x2) + pad)]
+    mocr = engine._mocr
+    x = mocr.processor(Image.fromarray(crop).convert("L").convert("RGB"), return_tensors="pt").pixel_values.squeeze()
+    with torch.inference_mode():
+        out = mocr.model.generate(
+            x[None].to(mocr.model.device), max_length=300, num_beams=1, no_repeat_ngram_size=0, do_sample=False
+        )[0].cpu()
+    return post_process(mocr.tokenizer.decode(out, skip_special_tokens=True))
 
 
 def main(folder: Path) -> None:
@@ -45,7 +64,9 @@ def main(folder: Path) -> None:
         rows = []
         for b in bubbles:
             row = b.to_json()
-            row["text"] = engine.ocr(img, Bubble.from_json(row))
+            bubble = Bubble.from_json(row)
+            row["text"] = engine.ocr(img, bubble)
+            row["text_greedy"] = ocr_greedy(engine, img, bubble)
             rows.append(row)
         doc = {
             "width": int(img.shape[1]),
