@@ -1,6 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { explainErrorMessage, modelStatusLine, freeLeftText, ankiErrorMessage, pictureFilename } from "../panel/logic.js";
+import {
+  explainErrorMessage,
+  modelStatusLine,
+  freeLeftText,
+  ankiErrorMessage,
+  pictureFilename,
+  ownKeyCheck,
+  shouldAskPermission,
+  llmModeAfter,
+  validateBaseUrl,
+  freeRemainingAfterError,
+} from "../panel/logic.js";
 
 test("free-tier and no_text copy is exact", () => {
   assert.deepEqual(explainErrorMessage("free_daily_limit"), {
@@ -73,4 +84,59 @@ test("anki errors", () => {
 
 test("card picture file name keeps the v1 scheme", () => {
   assert.equal(pictureFilename("0123456789abcdef0123", 7), "anki_manga_0123456789ab_7.jpg");
+});
+
+// --- fix round 1 ---------------------------------------------------------------------------
+test("a blank key field reuses the stored key only for the same provider and base URL", () => {
+  const stored = { provider: "deepseek", baseUrl: "", apiKey: "sk-old" };
+  const err = "Enter the API key for this provider.";
+  assert.deepEqual(ownKeyCheck(stored, { provider: "deepseek", baseUrl: "", typedKey: "" }), { ok: true, key: "sk-old" });
+  assert.deepEqual(ownKeyCheck(stored, { provider: "deepseek", baseUrl: "https://ignored.example", typedKey: " " }), { ok: true, key: "sk-old" });
+  assert.deepEqual(ownKeyCheck(stored, { provider: "custom", baseUrl: "https://proxy.example/v1", typedKey: "" }), { ok: false, error: err });
+  assert.deepEqual(ownKeyCheck(stored, { provider: "custom", baseUrl: "https://proxy.example/v1", typedKey: " sk-new " }), { ok: true, key: "sk-new" });
+  const custom = { provider: "custom", baseUrl: "https://proxy.example/v1", apiKey: "sk-c" };
+  assert.deepEqual(ownKeyCheck(custom, { provider: "custom", baseUrl: "https://proxy.example/v1/", typedKey: "" }), { ok: true, key: "sk-c" });
+  assert.deepEqual(ownKeyCheck(custom, { provider: "custom", baseUrl: "https://other.example/v1", typedKey: "" }), { ok: false, error: err });
+  assert.deepEqual(ownKeyCheck(custom, { provider: "deepseek", baseUrl: "", typedKey: "" }), { ok: false, error: err });
+  assert.deepEqual(ownKeyCheck({ provider: "deepseek", baseUrl: "", apiKey: "" }, { provider: "deepseek", baseUrl: "", typedKey: "" }), { ok: false, error: err });
+});
+
+test("after a denial only an explicit user action asks for the Anki permission again", () => {
+  assert.equal(shouldAskPermission({ denied: false, userAction: false }), true); // first use, or Anki was not running
+  assert.equal(shouldAskPermission({ denied: true, userAction: false }), false); // tab events, bubble clicks
+  assert.equal(shouldAskPermission({ denied: true, userAction: true }), true); // "Connect to Anki", "+"
+  assert.equal(shouldAskPermission({ denied: false, userAction: true }), true);
+});
+
+test("the explanation mode only becomes own once a key is saved", () => {
+  const free = { mode: "free", apiKey: "" };
+  assert.equal(llmModeAfter("open_own_key", free), "free");
+  assert.equal(llmModeAfter("select_own", free), "free"); // no key yet
+  assert.equal(llmModeAfter("select_own", { mode: "free", apiKey: "sk-x" }), "own");
+  assert.equal(llmModeAfter("save_own", free), "own");
+  assert.equal(llmModeAfter("select_free", { mode: "own", apiKey: "sk-x" }), "free");
+  assert.equal(llmModeAfter("save_own_refused", free), "free");
+  assert.equal(llmModeAfter("save_own_refused", { mode: "own", apiKey: "sk-x" }), "own");
+});
+
+test("custom base URLs: https, or http only for localhost", () => {
+  assert.deepEqual(validateBaseUrl(" https://api.example.com/v1 "), { ok: true, origin: "https://api.example.com", baseUrl: "https://api.example.com/v1" });
+  for (const u of ["http://localhost:11434/v1", "http://127.0.0.1:8080/v1", "http://[::1]:8080/v1"]) {
+    assert.equal(validateBaseUrl(u).ok, true, u);
+  }
+  assert.deepEqual(validateBaseUrl("http://localhost:11434/v1").origin, "http://localhost:11434");
+  const insecure = { ok: false, error: "Use an https:// base URL (http:// is only allowed for localhost)." };
+  assert.deepEqual(validateBaseUrl("http://api.example.com/v1"), insecure);
+  assert.deepEqual(validateBaseUrl("http://localhost.evil.example/v1"), insecure);
+  const garbage = { ok: false, error: "Enter the provider's base URL, e.g. https://api.example.com/v1." };
+  for (const u of ["", "not a url", "ftp://example.com", "javascript:alert(1)", "//example.com"]) {
+    assert.deepEqual(validateBaseUrl(u), garbage, u);
+  }
+});
+
+test("a free-tier limit answer sets the 'left today' count to 0", () => {
+  assert.equal(freeRemainingAfterError("free_daily_limit"), 0);
+  assert.equal(freeRemainingAfterError("free_monthly_cap"), 0);
+  assert.equal(freeRemainingAfterError("free_unavailable"), null);
+  assert.equal(freeRemainingAfterError("auth"), null);
 });

@@ -1,6 +1,6 @@
 // The settings drawer: deck, explanation source (free / own key), text-recognition mode, delete data.
 import { getSettings, setSettings } from "../lib/settings.js";
-import { freeLeftText, ankiErrorMessage } from "./logic.js";
+import { freeLeftText, ankiErrorMessage, ownKeyCheck, llmModeAfter, validateBaseUrl } from "./logic.js";
 import { deckNames, forgetKnown } from "./anki.js";
 import { engine } from "./engine.js";
 import { state } from "./state.js";
@@ -20,24 +20,31 @@ async function saveDeck(deck) {
   await chrome.storage.local.set({ decks });
 }
 
-export async function loadDecks() {
+// userAction: true from the "Connect to Anki" button; events (tab changes) never re-ask after a denial.
+export async function loadDecks({ userAction = false } = {}) {
   const select = $("deck");
   try {
-    const names = await deckNames();
+    const names = await deckNames({ userAction });
+    $("anki-connect").hidden = true;
     const chosen = (await currentDeck()) || (names.includes("manga mining") ? "manga mining" : names[0]);
     select.replaceChildren(...names.map((d) => new Option(d, d, false, d === chosen)));
     $("deck-state").textContent = "";
     if (chosen) await saveDeck(chosen);
   } catch (e) {
     $("deck-state").textContent = ankiErrorMessage(e.kind || "anki_error", e.kind ? "" : e.message);
+    $("anki-connect").hidden = false;
   }
 }
 
 // --- explanations: free or own key ----------------------------------------------------
+// The own-key form can be open while the saved mode is still "free": the mode flips when a key is saved.
+let ownFormOpen = false;
+
 async function showLlm() {
   const { llm } = await getSettings();
-  document.querySelector(`input[name="llm-mode"][value="${llm.mode}"]`).checked = true;
-  $("own-key").hidden = llm.mode !== "own";
+  const showOwn = llm.mode === "own" || ownFormOpen;
+  document.querySelector(`input[name="llm-mode"][value="${showOwn ? "own" : "free"}"]`).checked = true;
+  $("own-key").hidden = !showOwn;
   $("provider").value = llm.provider;
   $("base-url-field").hidden = llm.provider !== "custom";
   $("base-url").value = llm.baseUrl;
@@ -51,41 +58,42 @@ async function showFreeLeft() {
 }
 
 async function saveOwn() {
-  const settings = await getSettings();
+  const { llm } = await getSettings();
   const provider = $("provider").value;
-  const key = $("api-key").value.trim() || settings.llm.apiKey;
-  const baseUrl = $("base-url").value.trim();
-  const model = $("model").value.trim();
-  if (!key) {
-    $("own-state").textContent = "Paste your API key first.";
-    return;
-  }
+  const say = (text) => {
+    $("own-state").textContent = text;
+  };
+  const baseInput = $("base-url").value.trim();
+  const checked = ownKeyCheck(llm, { provider, baseUrl: baseInput, typedKey: $("api-key").value });
+  let origin = null;
   if (provider === "custom") {
-    let origin;
-    try {
-      const u = new URL(baseUrl);
-      if (u.protocol !== "https:" && u.protocol !== "http:") throw new Error("scheme");
-      origin = u.origin;
-    } catch {
-      $("own-state").textContent = "Enter the provider's base URL, e.g. https://api.example.com/v1.";
-      return;
-    }
-    // Still inside the click handler: the permission prompt needs the user gesture, so nothing is awaited before it.
-    const granted = await chrome.permissions.request({ origins: [`${origin}/*`] });
-    if (!granted) {
-      $("own-state").textContent = `Not saved: the extension needs permission to contact ${new URL(origin).host}.`;
-      return;
-    }
+    const url = validateBaseUrl(baseInput);
+    if (!url.ok) return say(url.error);
+    origin = url.origin;
   }
-  await setSettings({ llm: { provider, apiKey: key, baseUrl: provider === "custom" ? baseUrl : "", model } });
+  if (!checked.ok) return say(checked.error);
+  // Still inside the click handler: the permission prompt needs the user gesture, so nothing is awaited before it.
+  if (origin && !(await chrome.permissions.request({ origins: [`${origin}/*`] }))) {
+    return say(`Not saved: the extension needs permission to contact ${new URL(origin).host}.`);
+  }
+  await setSettings({
+    llm: {
+      mode: llmModeAfter("save_own", llm),
+      provider,
+      apiKey: checked.key,
+      baseUrl: provider === "custom" ? baseInput : "",
+      model: $("model").value.trim(),
+    },
+  });
+  ownFormOpen = false;
   $("api-key").value = "";
-  $("own-state").textContent = "Saved.";
+  say("Saved.");
   showLlm();
 }
 
 // "Add your own API key" in an error message: open the settings with the own-key form.
 export async function openOwnKey() {
-  await setSettings({ llm: { mode: "own" } });
+  ownFormOpen = true; // the mode stays "free" until a key is saved
   await showLlm();
   $("settings").open = true;
   $("settings").scrollIntoView();
@@ -98,7 +106,10 @@ export async function initSettings() {
   });
   for (const radio of document.querySelectorAll('input[name="llm-mode"]')) {
     radio.addEventListener("change", async () => {
-      await setSettings({ llm: { mode: radio.value } });
+      const { llm } = await getSettings();
+      ownFormOpen = radio.value === "own";
+      const mode = llmModeAfter(radio.value === "own" ? "select_own" : "select_free", llm);
+      if (mode !== llm.mode) await setSettings({ llm: { mode } });
       showLlm();
     });
   }
@@ -106,6 +117,7 @@ export async function initSettings() {
     $("base-url-field").hidden = $("provider").value !== "custom";
   });
   $("save-own").addEventListener("click", saveOwn);
+  $("anki-connect").addEventListener("click", () => loadDecks({ userAction: true }));
 
   $("perf").value = (await getSettings()).perfMode;
   $("perf").addEventListener("change", () => setSettings({ perfMode: $("perf").value }));

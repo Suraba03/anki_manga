@@ -54,8 +54,10 @@ class Cdp {
     this.ws = ws;
     this.id = 0;
     this.pending = new Map();
+    this.handlers = new Map();
     ws.addEventListener("message", (ev) => {
       const m = JSON.parse(ev.data);
+      if (m.method) this.handlers.get(m.method)?.(m.params);
       const p = m.id && this.pending.get(m.id);
       if (!p) return;
       this.pending.delete(m.id);
@@ -68,6 +70,9 @@ class Cdp {
       ws.addEventListener("open", () => resolve(new Cdp(ws)));
       ws.addEventListener("error", () => reject(new Error(`cannot open ${url}`)));
     });
+  }
+  on(method, fn) {
+    this.handlers.set(method, fn);
   }
   send(method, params = {}) {
     const id = ++this.id;
@@ -152,6 +157,7 @@ function startServer(image) {
 // A stand-in for AnkiConnect (the real one is Anki's add-on): records the notes it is asked to add. It listens on
 // its own port and the panel page is pointed at it, so a running Anki is never touched by the test.
 const FAKE_ANKI_PORT = 8766;
+const REAL_ANKI_PORT = 8765;
 function startFakeAnki() {
   const notes = [];
   const server = createServer((req, res) => {
@@ -189,15 +195,36 @@ async function panelCheck(sw, ref) {
   const created = await (await fetch(`http://127.0.0.1:${PORT}/json/new?about:blank`, { method: "PUT" })).json();
   const panel = await Cdp.open(created.webSocketDebuggerUrl);
   const anki = await startFakeAnki();
+  let redirected = 0;
   if (!anki) throw new Error(`port ${FAKE_ANKI_PORT} is busy`);
   try {
     await panel.send("Page.enable");
     await panel.send("Page.addScriptToEvaluateOnNewDocument", {
       source: `{ const send = chrome.runtime.sendMessage.bind(chrome.runtime);
-        chrome.runtime.sendMessage = (m, ...rest) => send(m && m.type === "am:engine" ? { target: "offscreen", ...m.msg } : m, ...rest);
-        const get = window.fetch.bind(window);
-        window.fetch = (u, ...rest) => get(String(u).replace("127.0.0.1:8765", "127.0.0.1:${FAKE_ANKI_PORT}"), ...rest); }`,
+        chrome.runtime.sendMessage = (m, ...rest) => send(m && m.type === "am:engine" ? { target: "offscreen", ...m.msg } : m, ...rest); }`,
     });
+    // Fail-safe guard for the real AnkiConnect: every request of the panel page passes through here, and one aimed
+    // at port 8765 (whatever the host spelling) goes to the fake instead; if that cannot be done it is failed.
+    panel.on("Fetch.requestPaused", (ev) => {
+      let target = null;
+      try {
+        const u = new URL(ev.request.url);
+        if ((u.port || (u.protocol === "https:" ? "443" : "80")) === String(REAL_ANKI_PORT)) {
+          target = new URL(ev.request.url);
+          target.protocol = "http:";
+          target.hostname = "127.0.0.1";
+          target.port = String(FAKE_ANKI_PORT);
+        }
+      } catch {
+        // an unparseable URL cannot be aimed at Anki; it is not network traffic of ours
+      }
+      const reply = /:8765\b/.test(ev.request.url) && !target
+        ? panel.send("Fetch.failRequest", { requestId: ev.requestId, errorReason: "BlockedByClient" })
+        : panel.send("Fetch.continueRequest", { requestId: ev.requestId, ...(target && { url: target.href }) });
+      reply.catch(() => {});
+      if (target) redirected++;
+    });
+    await panel.send("Fetch.enable", { patterns: [{ urlPattern: "*" }] });
     await panel.send("Page.navigate", { url: `chrome-extension://${id}/panel/panel.html` });
     const text = (sel) => panel.evaluate(`document.querySelector(${JSON.stringify(sel)})?.textContent ?? ""`);
     await waitFor(async () => (await text("#status")).startsWith("Ready"), "the panel to show the model status", 20000);
@@ -216,7 +243,8 @@ async function panelCheck(sw, ref) {
     const pic = note.picture?.[0];
     console.log(`panel card: deck=${note.deckName} Word=${note.fields.Word} Reading=${note.fields.Reading} picture=${pic?.filename} (${pic?.data.length} base64 chars)`);
     const cardOk = note.deckName === "manga mining" && !!note.fields.Word && /^anki_manga_[0-9a-f]{12}_\d+\.jpg$/.test(pic?.filename) && pic.data.length > 1000;
-    return cardOk && msg.includes("free explanation service is unavailable");
+    console.log(`panel requests redirected from port ${REAL_ANKI_PORT} to the fake: ${redirected}`);
+    return cardOk && redirected > 0 && msg.includes("free explanation service is unavailable");
   } finally {
     anki.server.close();
     panel.close();

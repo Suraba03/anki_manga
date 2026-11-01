@@ -5,7 +5,7 @@ import { getSettings } from "../lib/settings.js";
 import { openStore } from "../engine/store.js";
 import { rubyHtml } from "../lib/text.js";
 import { cardFields } from "../lib/cards.js";
-import { explainErrorMessage, ankiErrorMessage, pictureFilename, DICT_UNAVAILABLE, NO_DECK } from "./logic.js";
+import { explainErrorMessage, ankiErrorMessage, pictureFilename, freeRemainingAfterError, DICT_UNAVAILABLE, NO_DECK } from "./logic.js";
 import { engine } from "./engine.js";
 import { ankiForCards, knownWords } from "./anki.js";
 import { currentDeck, openOwnKey } from "./settings.js";
@@ -220,6 +220,8 @@ export async function explainSelection(sel) {
     tr.textContent = "";
     const { text, action } = explainErrorMessage(r.error);
     addMsg(el, text, action);
+    const left = freeRemainingAfterError(r.error);
+    if (left !== null) chrome.storage.session.set({ freeRemaining: left });
     return;
   }
   if (r.remaining != null) chrome.storage.session.set({ freeRemaining: r.remaining });

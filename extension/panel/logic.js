@@ -63,3 +63,57 @@ export const DICT_UNAVAILABLE = "The dictionary could not be loaded — check yo
 export const pictureFilename = (pageId, bubbleId) => `anki_manga_${pageId.slice(0, 12)}_${bubbleId}.jpg`;
 
 export const NO_DECK = "Pick an Anki deck in Settings first.";
+
+// --- own key -------------------------------------------------------------------------------
+const trimUrl = (u) => String(u || "").trim().replace(/\/+$/, "");
+// Provider plus base URL identify where a key belongs (the base URL only counts for "custom").
+const keyHome = ({ provider, baseUrl }) => `${provider}|${provider === "custom" ? trimUrl(baseUrl) : ""}`;
+
+// stored: the saved llm settings; form: {provider, baseUrl, typedKey}. A blank key field reuses the stored key
+// only for the same provider and base URL, so a key is never sent to a host it was not entered for.
+export function ownKeyCheck(stored, { provider, baseUrl, typedKey }) {
+  const typed = String(typedKey || "").trim();
+  if (typed) return { ok: true, key: typed };
+  if (stored.apiKey && keyHome(stored) === keyHome({ provider, baseUrl })) return { ok: true, key: stored.apiKey };
+  return { ok: false, error: "Enter the API key for this provider." };
+}
+
+// The explanation mode after a settings event. It becomes "own" only once a key is saved (or already is).
+export function llmModeAfter(event, llm) {
+  switch (event) {
+    case "select_free":
+      return "free";
+    case "select_own":
+      return llm.apiKey ? "own" : llm.mode;
+    case "save_own":
+      return "own";
+    default: // open_own_key, save_own_refused
+      return llm.mode;
+  }
+}
+
+const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+// -> {ok:true, origin, baseUrl} | {ok:false, error}. https, or http for this computer only.
+export function validateBaseUrl(input) {
+  const bad = { ok: false, error: "Enter the provider's base URL, e.g. https://api.example.com/v1." };
+  let u;
+  try {
+    u = new URL(String(input || "").trim());
+  } catch {
+    return bad;
+  }
+  if (u.protocol !== "https:" && u.protocol !== "http:") return bad;
+  if (u.protocol === "http:" && !LOCAL_HOSTS.has(u.hostname)) {
+    return { ok: false, error: "Use an https:// base URL (http:// is only allowed for localhost)." };
+  }
+  return { ok: true, origin: u.origin, baseUrl: String(input).trim() };
+}
+
+// --- anki permission, free count -------------------------------------------------------------
+// Anki shows its dialog on every requestPermission from an origin it has not allowed: after a "No" only a user
+// action (Connect to Anki, "+") may ask again, never a tab event or a bubble click.
+export const shouldAskPermission = ({ denied, userAction }) => !denied || !!userAction;
+
+// A limit answer from the free tier means nothing is left (null: not a limit answer).
+export const freeRemainingAfterError = (code) => (code === "free_daily_limit" || code === "free_monthly_cap" ? 0 : null);
