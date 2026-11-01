@@ -6,6 +6,9 @@ import { configureOrt } from "../engine/runtime.js";
 import { startEngine } from "../engine/startup.js";
 import { openStore } from "../engine/store.js";
 import { OcrScheduler } from "../engine/scheduler.js";
+import { createTokenizer } from "../lib/tokenizer.js";
+import { rubyHtml } from "../lib/text.js";
+import { findPanelBox, cropJpeg } from "../engine/panel-crop.js";
 
 configureOrt(ort);
 
@@ -230,6 +233,42 @@ async function enginePrioritize({ pageId, bubbleId }) {
   return { ok: true };
 }
 
+// kuromoji loads its dictionary on first use; it does not depend on the OCR models. Its bundled path.join
+// collapses the "//" of a chrome-extension:// URL, so the dictionary path is root-relative instead.
+let tokenizerReady = null;
+function tokenizer() {
+  tokenizerReady ||= createTokenizer(globalThis.kuromoji, "/vendor/kuromoji/dict/").catch((e) => {
+    tokenizerReady = null; // a failed load can be retried
+    throw e;
+  });
+  return tokenizerReady;
+}
+
+// The page and bubble as stored; { error } when either is unknown.
+async function findBubble({ pageId, bubbleId }) {
+  store ||= await openStore(indexedDB);
+  const bubble = (await store.getPage(pageId))?.bubbles.find((b) => b.id === bubbleId);
+  return bubble ? { bubble } : { error: "unknown_bubble" };
+}
+
+// Text, furigana and tokens of a bubble whose text is known (works while the models are still downloading).
+async function engineBubble(msg) {
+  const { bubble, error } = await findBubble(msg);
+  if (error) return { ok: false, error };
+  if (!bubble.text) return { ok: false, error: "no_text" };
+  const tokens = (await tokenizer()).tokenize(bubble.text);
+  return { ok: true, text: bubble.text, rubyHtml: rubyHtml(bubble.text, tokens), tokens };
+}
+
+// JPEG (base64) of the panel around a bubble, for the Anki card.
+async function engineCrop(msg) {
+  const { bubble, error } = await findBubble(msg);
+  if (error) return { ok: false, error };
+  const rgba = await rgbaFor(msg.pageId);
+  if (!rgba) return { ok: false, error: "page_expired" };
+  return { ok: true, jpegBase64: await cropJpeg(rgba, findPanelBox(rgba, bubble.box)) };
+}
+
 async function engineClear() {
   store ||= await openStore(indexedDB);
   // Queued jobs are dropped and the running one is awaited and discarded before the engine goes away.
@@ -251,6 +290,8 @@ const handlers = {
   "eng:probe-anki": probeAnki,
   "eng:page": enginePage,
   "eng:prioritize": enginePrioritize,
+  "eng:bubble": engineBubble,
+  "eng:crop": engineCrop,
   "eng:status": async () => ({ ok: true, ...status }),
   "eng:clear": engineClear,
 };

@@ -196,7 +196,21 @@ async function smoke(sw) {
     for (const [id, , text] of done) if (want.get(id) === text) same++;
     for (const [id, , text] of done.slice(0, 3)) console.log(`  #${id} ${JSON.stringify(text)}  reference ${JSON.stringify(want.get(id) ?? null)}`);
     if (reference) console.log(`matching the reference text_greedy: ${same}/${done.length}`);
-    return done.length >= Math.ceil(bubbles.length * 0.8) && (!reference || same >= Math.ceil(done.length * 0.8));
+    // Furigana and the panel picture for one bubble, asked the way the side panel will (through the service worker).
+    const engine = (msg) => sw.evaluate(`engineCall(${JSON.stringify(msg)})`);
+    const known = await engine({ type: "eng:page", source: { url: `${origin}/page.jpg` }, ocr: "none" });
+    const target = known.ok && known.page.bubbles.find((b) => b.text);
+    let extras = !!target;
+    if (target) {
+      const ref = { pageId: known.page.page_id, bubbleId: target.id };
+      const bub = await engine({ type: "eng:bubble", ...ref });
+      console.log(`eng:bubble #${target.id} ok=${bub.ok} tokens=${bub.tokens?.length} ${bub.rubyHtml ?? bub.error}`);
+      const crop = await engine({ type: "eng:crop", ...ref });
+      const bytes = crop.ok ? Buffer.from(crop.jpegBase64, "base64") : null;
+      console.log(`eng:crop #${target.id} ok=${crop.ok} bytes=${bytes?.length ?? crop.error}`);
+      extras = bub.ok && bub.tokens.length > 0 && bub.rubyHtml.length > 0 && !!bytes && bytes[0] === 0xff && bytes[1] === 0xd8;
+    } else console.log("eng:bubble / eng:crop not checked: no bubble with text");
+    return extras && done.length >= Math.ceil(bubbles.length * 0.8) && (!reference || same >= Math.ceil(done.length * 0.8));
   } finally {
     tab?.close();
     server.close();
