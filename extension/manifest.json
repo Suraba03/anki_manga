@@ -6,7 +6,7 @@
   "minimum_chrome_version": "116",
   "permissions": ["storage", "sidePanel", "scripting", "tabs"],
   "host_permissions": ["http://127.0.0.1/*"],
-  "optional_host_permissions": ["*://*/*"],
+  "optional_host_permissions": ["*://*/*", "<all_urls>"],
   "background": { "service_worker": "background.js", "type": "module" },
   "side_panel": { "default_path": "panel/panel.html" },
   "action": {

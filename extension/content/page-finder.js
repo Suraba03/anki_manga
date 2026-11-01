@@ -7,10 +7,15 @@
     return Math.min(w, h) >= MIN_SIDE && Math.max(w, h) >= MIN_LONG_SIDE;
   }
 
-  function realImageUrl(img) {
-    const candidates = [img.dataset && img.dataset.src, img.getAttribute("data-original"), img.src];
+  function realImageUrl(img, base = globalThis.document ? document.baseURI : undefined) {
+    const candidates = [img.dataset && img.dataset.src, img.getAttribute("data-original"), img.currentSrc, img.src];
     for (const url of candidates) {
-      if (url && !url.startsWith("data:")) return url;
+      if (!url || url.startsWith("data:")) continue;
+      try {
+        return new URL(url, base).href;
+      } catch {
+        /* unparseable attribute: try the next candidate */
+      }
     }
     return null;
   }

@@ -10,6 +10,8 @@ export const MESSAGES = {
   bad_response: "Explanation failed — click the bubble again to retry.",
   anki_unreachable: "Anki isn't running — open Anki with AnkiConnect to add cards.",
   page_expired: "This page is no longer cached — scroll back to it and try again.",
+  no_balance: "Your DeepSeek account has no balance — top it up on platform.deepseek.com.",
+  rate_limited: "DeepSeek is rate-limiting requests — wait a moment and click the bubble again.",
 };
 
 const state = { origin: null, tabId: null, ready: false };
@@ -17,6 +19,10 @@ const state = { origin: null, tabId: null, ready: false };
 function setStatus(kind, text) {
   $("status").dataset.state = kind;
   $("status").textContent = text;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
 
 function showBanner(html) {
@@ -42,10 +48,16 @@ async function connect() {
       state.ready = false;
       return;
     }
-    showBanner("");
     state.ready = true;
+    if (h.status === "error") {
+      setStatus("down", "Model loading failed");
+      showBanner(`The helper couldn't load the OCR models: ${escapeHtml(h.error || "unknown error")}. Check your internet connection and restart <code>anki-manga-helper</code>.`);
+      return;
+    }
+    showBanner("");
     if (h.status === "ready") setStatus("ready", "Helper ready");
     else setStatus("warming", MESSAGES.warming);
+    loadDecks();
     $("key-state").textContent = h.has_api_key ? "Key saved." : "No key yet.";
     if (h.status !== "ready") setTimeout(connect, 3000);
   } catch {
@@ -103,11 +115,27 @@ async function renderHostRequests() {
     });
     buttons.push(btn);
   }
+  const { captureBlocked = {} } = await chrome.storage.session.get("captureBlocked");
+  if (state.tabId != null && captureBlocked[state.tabId] && !(await chrome.permissions.contains({ origins: ["<all_urls>"] }))) {
+    const btn = document.createElement("button");
+    btn.className = "btn";
+    btn.type = "button";
+    btn.textContent = "Allow screenshots (needed for canvas readers)";
+    btn.addEventListener("click", async () => {
+      if (!(await chrome.permissions.request({ origins: ["<all_urls>"] }))) return;
+      const { captureBlocked: cb = {} } = await chrome.storage.session.get("captureBlocked");
+      delete cb[state.tabId];
+      await chrome.storage.session.set({ captureBlocked: cb });
+      chrome.tabs.sendMessage(state.tabId, { type: "am:retry" }).catch(() => {});
+      renderHostRequests();
+    });
+    buttons.push(btn);
+  }
   $("host-requests").replaceChildren(...buttons);
 }
 
 chrome.storage.session.onChanged.addListener((changes) => {
-  if (changes.missingHosts) renderHostRequests();
+  if (changes.missingHosts || changes.captureBlocked) renderHostRequests();
 });
 
 $("site-toggle").addEventListener("click", async () => {

@@ -47,3 +47,10 @@ test("visibleFraction measures how much of a rect is on screen", () => {
   assert.equal(PageFinder.visibleFraction({ left: 0, top: -50, width: 100, height: 100 }, { w: 1000, h: 1000 }), 0.5);
   assert.equal(PageFinder.visibleFraction({ left: 0, top: 2000, width: 100, height: 100 }, { w: 1000, h: 1000 }), 0);
 });
+
+test("realImageUrl resolves relative and protocol-relative lazy URLs against the page", () => {
+  const base = "https://reader.example/manga/ch1/";
+  assert.equal(PageFinder.realImageUrl(img("data:x", "/img/6.jpg"), base), "https://reader.example/img/6.jpg");
+  assert.equal(PageFinder.realImageUrl(img("data:x", "//cdn.example/6.jpg"), base), "https://cdn.example/6.jpg");
+  assert.equal(PageFinder.realImageUrl(img("data:x", "p6.jpg"), base), "https://reader.example/manga/ch1/p6.jpg");
+});

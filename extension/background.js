@@ -42,7 +42,11 @@ async function disableSite(origin, tabId) {
 // --- page pipeline ------------------------------------------------------------------
 const MIN_SIDE = 400;
 const MIN_LONG_SIDE = 600;
-const relaying = new Set(); // `${tabId}:${pageId}` streams in flight
+// OCR results stream from the helper per displayed page. Chrome allows ~6 connections per
+// host, so cap streams and keep the rest of the slots for hover/click requests.
+const MAX_STREAMS = 3;
+const relaying = new Set(); // `${tabId}:${pageId}` streams open
+const streamQueue = []; // [tabId, pageId] waiting for a slot
 
 async function noteMissingHost(tabId, host) {
   const { missingHosts = {} } = await chrome.storage.session.get("missingHosts");
@@ -95,14 +99,23 @@ async function sendPage(bytes, contentType, imageUrl, tabId) {
   } catch (e) {
     return { ok: false, error: e.error || "helper_unreachable" };
   }
-  if (page.bubbles.some((b) => b.text == null)) relayTexts(tabId, page.page_id);
   return { ok: true, page };
 }
 
 // Stream OCR results from the helper's SSE endpoint to the tab.
+function watchPage(tabId, pageId) {
+  const key = `${tabId}:${pageId}`;
+  if (relaying.has(key) || streamQueue.some(([t, p]) => t === tabId && p === pageId)) return;
+  if (relaying.size >= MAX_STREAMS) {
+    streamQueue.push([tabId, pageId]);
+    return;
+  }
+  relayTexts(tabId, pageId);
+}
+
+// The helper replays texts already finished, then streams the rest, then ends.
 async function relayTexts(tabId, pageId) {
   const key = `${tabId}:${pageId}`;
-  if (relaying.has(key)) return;
   relaying.add(key);
   try {
     const resp = await call(`/pages/${pageId}/events`);
@@ -124,9 +137,11 @@ async function relayTexts(tabId, pageId) {
       }
     }
   } catch {
-    /* helper went away; the content script retries pages on its own */
+    /* helper or worker went away; hovering an empty bubble re-sends am:watch */
   } finally {
     relaying.delete(key);
+    const next = streamQueue.shift();
+    if (next) relayTexts(...next);
   }
 }
 
@@ -138,6 +153,9 @@ async function captureElement(msg, sender) {
   try {
     dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
   } catch (e) {
+    const { captureBlocked = {} } = await chrome.storage.session.get("captureBlocked");
+    captureBlocked[tab.id] = true;
+    await chrome.storage.session.set({ captureBlocked });
     return { ok: false, error: "capture_failed", detail: String(e.message || e) };
   }
   const shot = await createImageBitmap(await (await fetch(dataUrl)).blob());
@@ -153,11 +171,12 @@ async function captureElement(msg, sender) {
 }
 
 async function select(msg, sender) {
+  // Must run before any await: the click's user gesture only lasts through this sync part.
+  if (sender.tab) chrome.sidePanel.open({ tabId: sender.tab.id }).catch(() => {});
   const selection = { ...msg, tabId: sender.tab && sender.tab.id, at: Date.now() };
   delete selection.type;
   await chrome.storage.session.set({ lastSelection: selection });
   chrome.runtime.sendMessage({ type: "am:selected", selection }).catch(() => {});
-  if (sender.tab) chrome.sidePanel.open({ tabId: sender.tab.id }).catch(() => {});
   return { ok: true };
 }
 
@@ -167,6 +186,10 @@ const handlers = {
   "am:disable-site": (msg) => disableSite(msg.origin, msg.tabId).then(() => ({ ok: true })),
   "am:page": processImage,
   "am:capture": captureElement,
+  "am:watch": (msg, sender) => {
+    if (sender.tab) watchPage(sender.tab.id, msg.pageId);
+    return Promise.resolve({ ok: true });
+  },
   "am:prioritize": (msg) =>
     call(`/pages/${msg.pageId}/bubbles/${msg.bubbleId}/prioritize`, { method: "POST" })
       .then(() => ({ ok: true }))
