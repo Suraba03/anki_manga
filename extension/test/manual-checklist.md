@@ -1,7 +1,7 @@
 # Manual checklist (real Chrome, extension loaded unpacked)
 
 Setup: Anki + AnkiConnect open, Yomitan installed. No helper is needed any more.
-Reference site: the owner's scroll-style raw reader (see design conversation; not named in the repo).
+Reference site: a scroll-style reader that you enabled (not named in the repo).
 
 ## First run
 - [ ] 0a. `chrome://extensions` → Developer mode → Load unpacked → `extension/`. Click the toolbar icon: the side panel opens. The top status goes `Downloading models… N%` → `Loading models…` → `Ready (WebGPU)` (or `Ready (CPU)`).
@@ -12,13 +12,13 @@ Reference site: the owner's scroll-style raw reader (see design conversation; no
 ## Text layer
 - [ ] 1. Open a chapter and press `Alt+V`: red text sits on each bubble of pages 1–3, within about one character.
 - [ ] 2. Scroll to the first lazy page: its overlay appears. A page is processed once (no second pass for the same image after the `src` swap).
-- [ ] 3. Shift-hover 「正確」 on the 「これは坂の角度が正確に分かる道具なのです！」 page: the Yomitan popup shows 正確. Adding it with Yomitan's own "+" gives a `{sentence}` of exactly that bubble.
+- [ ] 3. Shift-hover a word in a bubble with a known line: the Yomitan popup shows that word. Adding it with Yomitan's own "+" gives a `{sentence}` of exactly that bubble.
 - [ ] 4. Resize the window: the overlay follows the images.
 - [ ] 5. On a site that isn't enabled: no `.am-bubble` elements in the DOM.
 - [ ] 5b. Hovering a bubble never calls an explanation (the panel stays unchanged; no network request to the free server or the provider).
 
 ## Free tier (no key)
-- [ ] 6. Click the 「これは坂の…」 bubble: furigana appears first, then the translation, 2–5 notes and 2–4 suggestions. Settings → Explanations shows `Free` selected and `N left today`.
+- [ ] 6. Click a bubble with a known line: furigana appears first, then the translation, 2–5 notes and 2–4 suggestions. Settings → Explanations shows `Free` selected and `N left today`.
 - [ ] 7. Click the same bubble again: it answers instantly (cached) and the count does not drop.
 - [ ] 8. Free server unavailable (offline, or before it is deployed): `The free explanation service is unavailable right now. Try again later or add your own API key.` plus an "Add your own API key" button that opens Settings with the own-key form.
 - [ ] 9. Daily limit used up: `Today's free explanations are used up — they reset tomorrow. Add your own API key to keep going.` Monthly cap: `Free explanations are used up for this month. Add your own API key to keep going.`
