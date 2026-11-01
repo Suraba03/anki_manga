@@ -71,8 +71,8 @@
       processed.delete(key);
       byImg.delete(img);
     } else {
-      // not_manga / fetch_failed / bad_image: leave it alone (Task 17 adds the screenshot fallback)
       byImg.set(img, { key, handle: null, failed: error });
+      if (error !== "not_manga") queueCapture(img);
     }
   }
 
@@ -116,6 +116,7 @@
 
   function scan(root = document) {
     root.querySelectorAll("img").forEach(watch);
+    root.querySelectorAll("canvas").forEach(watchCanvas);
   }
 
   new MutationObserver((records) => {
@@ -136,6 +137,7 @@
       for (const n of r.addedNodes || []) {
         if (n.nodeType !== 1) continue;
         if (n.tagName === "IMG") watch(n);
+        else if (n.tagName === "CANVAS") watchCanvas(n);
         else scan(n);
       }
     }
@@ -145,6 +147,63 @@
     attributes: true,
     attributeFilter: ["src", "data-src", "data-original"],
   });
+
+  // --- screenshot fallback (canvas readers, un-fetchable images) ------------------------------
+  const CAPTURE_MIN_VISIBLE = 0.9;
+  const captured = new WeakSet();
+  const capturePending = new Set();
+
+  function queueCapture(el) {
+    if (captured.has(el)) return;
+    capturePending.add(el);
+    tryCaptures();
+  }
+
+  let captureBusy = false;
+  async function tryCaptures() {
+    if (captureBusy) return;
+    captureBusy = true;
+    try {
+      for (const el of [...capturePending]) {
+        if (!el.isConnected) {
+          capturePending.delete(el);
+          continue;
+        }
+        const r = el.getBoundingClientRect();
+        const vp = { w: window.innerWidth, h: window.innerHeight };
+        if (PageFinder.visibleFraction(r, vp) < CAPTURE_MIN_VISIBLE) continue;
+        capturePending.delete(el);
+        captured.add(el);
+        const res = await send({
+          type: "am:capture",
+          rect: { x: r.left, y: r.top, width: r.width, height: r.height },
+          viewportWidth: window.innerWidth,
+        });
+        if (res && res.ok) {
+          const key = `capture:${res.page.page_id}`;
+          if (!byImg.get(el) || !byImg.get(el).handle) showPage(el, key, res.page);
+        } else if (res && RETRYABLE.has(res.error)) {
+          captured.delete(el);
+          setTimeout(() => queueCapture(el), RETRY_LATER);
+        }
+      }
+    } finally {
+      captureBusy = false;
+    }
+  }
+
+  const canvasIo = new IntersectionObserver(
+    (entries) => {
+      for (const e of entries) if (e.isIntersecting && PageFinder.isMangaElement(e.target)) queueCapture(e.target);
+    },
+    { rootMargin: "0px" },
+  );
+  function watchCanvas(c) {
+    if (c.__amWatched) return;
+    c.__amWatched = true;
+    canvasIo.observe(c);
+  }
+  window.addEventListener("scroll", () => capturePending.size && tryCaptures(), { passive: true, capture: true });
 
   // --- keeping overlays aligned -------------------------------------------------------------
   let rafPending = false;

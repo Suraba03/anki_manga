@@ -130,6 +130,28 @@ async function relayTexts(tabId, pageId) {
   }
 }
 
+// Fallback for canvas pages / images we can't fetch: crop a screenshot of the element.
+async function captureElement(msg, sender) {
+  const tab = sender.tab;
+  if (!tab) return { ok: false, error: "no_tab" };
+  let dataUrl;
+  try {
+    dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+  } catch (e) {
+    return { ok: false, error: "capture_failed", detail: String(e.message || e) };
+  }
+  const shot = await createImageBitmap(await (await fetch(dataUrl)).blob());
+  const { x, y, width, height } = msg.rect;
+  const scale = shot.width / msg.viewportWidth; // device pixels per CSS pixel in the capture
+  const w = Math.round(width * scale);
+  const h = Math.round(height * scale);
+  const canvas = new OffscreenCanvas(w, h);
+  canvas.getContext("2d").drawImage(shot, Math.round(x * scale), Math.round(y * scale), w, h, 0, 0, w, h);
+  shot.close();
+  const blob = await canvas.convertToBlob({ type: "image/png" });
+  return sendPage(await blob.arrayBuffer(), "image/png", "", tab.id);
+}
+
 async function select(msg, sender) {
   const selection = { ...msg, tabId: sender.tab && sender.tab.id, at: Date.now() };
   delete selection.type;
@@ -144,6 +166,7 @@ const handlers = {
   "am:enable-site": (msg) => enableSite(msg.origin, msg.tabId).then(() => ({ ok: true })),
   "am:disable-site": (msg) => disableSite(msg.origin, msg.tabId).then(() => ({ ok: true })),
   "am:page": processImage,
+  "am:capture": captureElement,
   "am:prioritize": (msg) =>
     call(`/pages/${msg.pageId}/bubbles/${msg.bubbleId}/prioritize`, { method: "POST" })
       .then(() => ({ ok: true }))

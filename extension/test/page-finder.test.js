@@ -34,3 +34,16 @@ test("isMangaImage keeps pages and drops icons", () => {
   assert.equal(PageFinder.isMangaImage(300, 250), false);
   assert.equal(PageFinder.isMangaImage(1, 1), false);
 });
+
+test("isMangaElement accepts big canvases and manga images, rejects small ones", () => {
+  assert.equal(PageFinder.isMangaElement({ tagName: "CANVAS", width: 800, height: 1200 }), true);
+  assert.equal(PageFinder.isMangaElement({ tagName: "CANVAS", width: 300, height: 150 }), false);
+  assert.equal(PageFinder.isMangaElement({ tagName: "IMG", naturalWidth: 1132, naturalHeight: 1600 }), true);
+  assert.equal(PageFinder.isMangaElement({ tagName: "DIV", width: 2000, height: 2000 }), false);
+});
+
+test("visibleFraction measures how much of a rect is on screen", () => {
+  assert.equal(PageFinder.visibleFraction({ left: 0, top: 0, width: 100, height: 100 }, { w: 1000, h: 1000 }), 1);
+  assert.equal(PageFinder.visibleFraction({ left: 0, top: -50, width: 100, height: 100 }, { w: 1000, h: 1000 }), 0.5);
+  assert.equal(PageFinder.visibleFraction({ left: 0, top: 2000, width: 100, height: 100 }, { w: 1000, h: 1000 }), 0);
+});
