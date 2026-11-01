@@ -325,7 +325,6 @@ cd extension && node --test                                           # логи
 
 - После правок в расширении: `chrome://extensions` → ↻ → перезагрузите вкладку.
 - Ручные проверки в браузере: [`extension/test/manual-checklist.md`](extension/test/manual-checklist.md).
-- Дизайн и план: [`docs/superpowers/`](docs/superpowers/).
 
 **Планы:**
 - **v2:** объяснения под ваш уровень и уточняющие вопросы по пузырю.

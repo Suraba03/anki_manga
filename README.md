@@ -327,7 +327,6 @@ cd extension && node --test                                           # extensio
 
 - After editing extension files: `chrome://extensions` → ↻ → reload the tab.
 - Manual browser checks: [`extension/test/manual-checklist.md`](extension/test/manual-checklist.md).
-- Design and plan: [`docs/superpowers/`](docs/superpowers/).
 
 **Roadmap:**
 - **v2:** explanations adapted to your level, and follow-up questions about a bubble.
