@@ -1,0 +1,106 @@
+{
+  "release": "models-1",
+  "sets": {
+    "webgpu": {
+      "det": {
+        "name": "comic-text-detector-fp16.onnx",
+        "url": "https://github.com/Suraba03/anki_manga/releases/download/models-1/comic-text-detector-fp16.onnx",
+        "sha256": "af802bfe7644e3ea1d803d06a7c7043f277a5ce89e86ad4502733a64136688a0",
+        "bytes": 47363910,
+        "source": {
+          "repo": "LunarOilRig/comic-text-onnx-fp16",
+          "revision": "048b3a98093a72cfb2ca30620a5c0434c9bdec8b",
+          "path": "comic-text-detector-fp16.onnx",
+          "license": "GPL-3.0 (comic-text-detector, dmMaze)"
+        }
+      },
+      "enc": {
+        "name": "encoder_model_fp16.onnx",
+        "url": "https://github.com/Suraba03/anki_manga/releases/download/models-1/encoder_model_fp16.onnx",
+        "sha256": "1a6a57bc3608195c4577b13ac3aadab810dce42fa22c5a3acf0570bffc013b60",
+        "bytes": 171851891,
+        "source": {
+          "repo": "onnx-community/manga-ocr-base-ONNX",
+          "revision": "f9023406bb2f6b17df67bc4a327c56ecd20611f0",
+          "path": "onnx/encoder_model_fp16.onnx",
+          "license": "Apache-2.0 (manga-ocr)"
+        }
+      },
+      "dec": {
+        "name": "decoder_model.onnx",
+        "url": "https://github.com/Suraba03/anki_manga/releases/download/models-1/decoder_model.onnx",
+        "sha256": "31ca14d6dee6b3966144e128d0481d5a91f5083cbced81fe7a9571713fa50cd4",
+        "bytes": 117445718,
+        "source": {
+          "repo": "onnx-community/manga-ocr-base-ONNX",
+          "revision": "f9023406bb2f6b17df67bc4a327c56ecd20611f0",
+          "path": "onnx/decoder_model.onnx",
+          "license": "Apache-2.0 (manga-ocr)"
+        }
+      },
+      "vocab": {
+        "name": "vocab.txt",
+        "url": "https://github.com/Suraba03/anki_manga/releases/download/models-1/vocab.txt",
+        "sha256": "344fbb6b8bf18c57839e924e2c9365434697e0227fac00b88bb4899b78aa594d",
+        "bytes": 24072,
+        "source": {
+          "repo": "kha-white/manga-ocr-base",
+          "revision": "aa6573bd10b0d446cbf622e29c3e084914df9741",
+          "path": "vocab.txt",
+          "license": "Apache-2.0 (manga-ocr)"
+        }
+      }
+    },
+    "wasm": {
+      "det": {
+        "name": "comic-text-detector.onnx",
+        "url": "https://github.com/Suraba03/anki_manga/releases/download/models-1/comic-text-detector.onnx",
+        "sha256": "1a86ace74961413cbd650002e7bb4dcec4980ffa21b2f19b86933372071d718f",
+        "bytes": 94669756,
+        "source": {
+          "repo": "mayocream/comic-text-detector-onnx",
+          "revision": "a5d67ec772adef819ef5b0e7aa701fcf4c8bf74a",
+          "path": "comic-text-detector.onnx",
+          "license": "GPL-3.0 (comic-text-detector, dmMaze)"
+        }
+      },
+      "enc": {
+        "name": "encoder_model_q4.onnx",
+        "url": "https://github.com/Suraba03/anki_manga/releases/download/models-1/encoder_model_q4.onnx",
+        "sha256": "76090259d3e3eefa4cde6390f054ba48339725f2ecbdd3cfb7a2e4be0ad8d1d7",
+        "bytes": 56733349,
+        "source": {
+          "repo": "onnx-community/manga-ocr-base-ONNX",
+          "revision": "f9023406bb2f6b17df67bc4a327c56ecd20611f0",
+          "path": "onnx/encoder_model_q4.onnx",
+          "license": "Apache-2.0 (manga-ocr)"
+        }
+      },
+      "dec": {
+        "name": "decoder_model_q4.onnx",
+        "url": "https://github.com/Suraba03/anki_manga/releases/download/models-1/decoder_model_q4.onnx",
+        "sha256": "607a4af139c61896149f38d0e91650c43fba3f2ef4325bae347287e64167ced1",
+        "bytes": 35832077,
+        "source": {
+          "repo": "onnx-community/manga-ocr-base-ONNX",
+          "revision": "f9023406bb2f6b17df67bc4a327c56ecd20611f0",
+          "path": "onnx/decoder_model_q4.onnx",
+          "license": "Apache-2.0 (manga-ocr)"
+        }
+      },
+      "vocab": {
+        "name": "vocab.txt",
+        "url": "https://github.com/Suraba03/anki_manga/releases/download/models-1/vocab.txt",
+        "sha256": "344fbb6b8bf18c57839e924e2c9365434697e0227fac00b88bb4899b78aa594d",
+        "bytes": 24072,
+        "source": {
+          "repo": "kha-white/manga-ocr-base",
+          "revision": "aa6573bd10b0d446cbf622e29c3e084914df9741",
+          "path": "vocab.txt",
+          "license": "Apache-2.0 (manga-ocr)"
+        }
+      }
+    },
+    "data": {}
+  }
+}
