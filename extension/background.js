@@ -2,7 +2,7 @@
 import { ensurePaired } from "./lib/helper-client.js";
 
 // Classic content scripts, loaded in this order into one isolated world.
-export const CONTENT_FILES = ["content/page-finder.js", "content/main.js"];
+export const CONTENT_FILES = ["content/page-finder.js", "content/layout.js", "content/main.js"];
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
