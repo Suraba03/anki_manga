@@ -78,8 +78,37 @@ async function refreshSite() {
   $("site-toggle").disabled = !origin;
   $("site-toggle").textContent = enabled ? "Disable on this site" : "Enable on this site";
   $("site-toggle").dataset.enabled = enabled ? "1" : "";
+  await renderHostRequests();
   await loadDecks();
 }
+
+// Images often come from a CDN host; asking for it needs a click (user gesture).
+async function renderHostRequests() {
+  const { missingHosts = {} } = await chrome.storage.session.get("missingHosts");
+  const hosts = state.tabId != null ? missingHosts[state.tabId] || [] : [];
+  const buttons = [];
+  for (const host of hosts) {
+    if (await chrome.permissions.contains({ origins: [`*://${host}/*`] })) continue;
+    const btn = document.createElement("button");
+    btn.className = "btn";
+    btn.type = "button";
+    btn.textContent = `Allow images from ${host}`;
+    btn.addEventListener("click", async () => {
+      if (!(await chrome.permissions.request({ origins: [`*://${host}/*`] }))) return;
+      const { missingHosts: mh = {} } = await chrome.storage.session.get("missingHosts");
+      mh[state.tabId] = (mh[state.tabId] || []).filter((h) => h !== host);
+      await chrome.storage.session.set({ missingHosts: mh });
+      chrome.tabs.sendMessage(state.tabId, { type: "am:retry" }).catch(() => {});
+      renderHostRequests();
+    });
+    buttons.push(btn);
+  }
+  $("host-requests").replaceChildren(...buttons);
+}
+
+chrome.storage.session.onChanged.addListener((changes) => {
+  if (changes.missingHosts) renderHostRequests();
+});
 
 $("site-toggle").addEventListener("click", async () => {
   const { origin, tabId } = state;
