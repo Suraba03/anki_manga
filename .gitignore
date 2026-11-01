@@ -1,0 +1,17 @@
+# Personal / copyrighted material — never commit
+/*.jpg
+/*.jpeg
+/*.png
+/*.webp
+yomitan-settings-*.json
+
+# Brainstorming companion
+.superpowers/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Secrets
+.env
