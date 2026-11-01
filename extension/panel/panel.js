@@ -170,7 +170,142 @@ chrome.tabs.onUpdated.addListener((id, info) => {
   if (id === state.tabId && info.url) refreshSite();
 });
 
+// --- explaining a clicked bubble ---------------------------------------------------------
+const MAX_ENTRIES = 30;
+let lastShown = 0;
+
+function message(error) {
+  if (MESSAGES[error]) return MESSAGES[error];
+  if (error === "network" || error === "deepseek" || /^http_5/.test(error)) return MESSAGES.bad_response;
+  return `Something went wrong (${error}).`;
+}
+
+function showMsg(entry, text) {
+  const box = entry.querySelector(".msg");
+  box.hidden = !text;
+  box.textContent = text || "";
+}
+
+function cardRow(s, sel, entry) {
+  const row = document.createElement("div");
+  row.className = "card" + (s.in_deck ? " have" : "");
+  const label = document.createElement("span");
+  const w = document.createElement("span");
+  w.className = "w";
+  w.textContent = s.word;
+  const m = document.createElement("span");
+  m.className = "m";
+  m.textContent = `${s.reading} · ${s.meaning}`;
+  label.append(w, m);
+  const btn = document.createElement("button");
+  btn.type = "button";
+  if (s.in_deck) {
+    btn.textContent = "✓ in deck";
+    btn.disabled = true;
+  } else {
+    btn.textContent = "+";
+    btn.title = "Add an Anki card";
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      btn.textContent = "…";
+      try {
+        await callJson("/cards", {
+          method: "POST",
+          json: {
+            page_id: sel.pageId,
+            bubble_id: sel.bubbleId,
+            deck: (await currentDeck()) || "",
+            word: s.word,
+            reading: s.reading,
+            meaning: s.meaning,
+            source_url: sel.pageUrl || "",
+            source_title: sel.pageTitle || "",
+          },
+        });
+        btn.textContent = "✓ added";
+        row.classList.add("have");
+      } catch (e) {
+        if (e.error === "duplicate") {
+          btn.textContent = "✓ in deck";
+          row.classList.add("have");
+        } else {
+          btn.disabled = false;
+          btn.textContent = "+";
+          showMsg(entry, message(e.error));
+        }
+      }
+    });
+  }
+  row.append(label, btn);
+  return row;
+}
+
+async function explainSelection(sel) {
+  if (!sel || sel.at <= lastShown) return;
+  lastShown = sel.at;
+  $("empty").hidden = true;
+  const entry = $("entry-tpl").content.firstElementChild.cloneNode(true);
+  $("entries").prepend(entry);
+  while ($("entries").querySelectorAll(".entry").length > MAX_ENTRIES) $("entries").lastElementChild.remove();
+  const jp = entry.querySelector(".jp");
+  const tr = entry.querySelector(".tr");
+  const notes = entry.querySelector(".notes");
+  const cards = entry.querySelector(".cards");
+  jp.textContent = "…";
+  jp.classList.add("skeleton");
+  entry.querySelector(".explain").hidden = true;
+
+  // 1) furigana: local and instant
+  try {
+    const b = await callJson(`/pages/${sel.pageId}/bubbles/${sel.bubbleId}`);
+    jp.innerHTML = b.ruby_html; // produced by the helper with all text HTML-escaped
+    jp.classList.remove("skeleton");
+  } catch (e) {
+    jp.textContent = "";
+    showMsg(entry, message(e.error));
+    return;
+  }
+
+  // 2) explanation: one DeepSeek call, cached by the helper
+  tr.textContent = "Explaining…";
+  tr.classList.add("skeleton");
+  try {
+    const data = await callJson("/explain", {
+      method: "POST",
+      json: { page_id: sel.pageId, bubble_id: sel.bubbleId, deck: (await currentDeck()) || "" },
+    });
+    tr.classList.remove("skeleton");
+    tr.textContent = `“${data.translation}”`;
+    notes.replaceChildren(
+      ...data.notes.map((n) => {
+        const div = document.createElement("div");
+        div.className = "note";
+        const b = document.createElement("b");
+        b.textContent = n.focus;
+        div.append(b, ` — ${n.explanation}`);
+        return div;
+      }),
+    );
+    cards.replaceChildren(...data.suggestions.map((s) => cardRow(s, sel, entry)));
+    entry.querySelector(".explain").hidden = false;
+    if (data.anki === "unreachable") showMsg(entry, MESSAGES.anki_unreachable);
+  } catch (e) {
+    tr.textContent = "";
+    tr.classList.remove("skeleton");
+    showMsg(entry, message(e.error));
+  }
+}
+
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg.type === "am:selected") explainSelection(msg.selection);
+});
+
 export { state, HelperError };
 
 await connect();
 await refreshSite();
+{
+  // A click that opened the panel arrives before this page listens: pick it up.
+  const { lastSelection } = await chrome.storage.session.get("lastSelection");
+  if (lastSelection && Date.now() - lastSelection.at < 15000) explainSelection(lastSelection);
+}
