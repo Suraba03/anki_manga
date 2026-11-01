@@ -26,3 +26,5 @@ docs/superpowers/
 
 # agent rules: kept local
 CLAUDE.md
+tools/.cache/
+tools/e2e/.cache/
