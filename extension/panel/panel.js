@@ -59,6 +59,7 @@ async function connect() {
     else setStatus("warming", MESSAGES.warming);
     loadDecks();
     $("key-state").textContent = h.has_api_key ? "Key saved." : "No key yet.";
+    if (!h.has_api_key) $("settings").open = true;
     if (h.status !== "ready") setTimeout(connect, 3000);
   } catch {
     state.ready = false;

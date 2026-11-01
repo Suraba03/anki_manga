@@ -5,7 +5,7 @@ Reference site: the owner's scroll-style raw reader (see design conversation; no
 
 ## Setup (Task 13)
 - [ ] 0a. `chrome://extensions` → Developer mode → Load unpacked → `extension/`. Click the toolbar icon: the side panel opens and shows **Helper ready**.
-- [ ] 0b. Settings → paste a DeepSeek key → Save → "Key saved."
+- [ ] 0b. "⚙ Settings — API key & deck" (top of the panel, opens by itself until a key is saved) → paste a DeepSeek key → Save → "Key saved."
 - [ ] 0c. The deck list includes `manga mining`. Anki now has the note type `Manga Mining (anki_manga)`.
 - [ ] 0d. Click "Enable on this site": Chrome asks for **that site only**. If the panel then shows "Allow images from <host>", click it once.
 

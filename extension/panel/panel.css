@@ -81,7 +81,8 @@ h5 { margin: 12px 0 4px; font-size: 11px; letter-spacing: .06em; text-transform:
 .card.have button, .card button:disabled { background: #999; cursor: default; }
 .skeleton { color: var(--muted); }
 .msg { margin-top: 8px; padding: 6px 8px; border-radius: 4px; background: color-mix(in srgb, var(--warn) 14%, var(--card)); }
-.settings { margin: 0 14px 14px; padding-top: 6px; border-top: 1px solid var(--line); }
+.settings { margin: 8px 14px 0; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+.settings[open] summary { font-weight: 600; color: var(--text); }
 .settings summary { cursor: pointer; color: var(--soft); padding: 4px 0; }
 .field { display: block; margin: 8px 0; }
 .row { display: flex; gap: 6px; margin-top: 3px; }
