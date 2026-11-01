@@ -13,6 +13,10 @@ chrome.runtime.onStartup.addListener(() => {
   restoreSites();
 });
 
+// Content scripts run next to untrusted pages: they must not read storage.local (settings hold the user's API key).
+// The mode they need is handed out by am:perf-mode below. Not persisted by Chrome, so set on every worker start.
+chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" }).catch(() => {});
+
 function scriptFor(origin) {
   return { id: `am:${origin}`, matches: [`${origin}/*`], js: CONTENT_FILES, persistAcrossSessions: true, runAt: "document_idle" };
 }
@@ -155,10 +159,42 @@ async function watchPage(tabId, pageId) {
   await loadWatchers();
   if (!watchers.has(pageId)) watchers.set(pageId, new Set());
   const tabs = watchers.get(pageId);
-  if (tabs.has(tabId)) return;
-  tabs.add(tabId);
-  await saveWatchers();
+  if (!tabs.has(tabId)) {
+    tabs.add(tabId);
+    await saveWatchers();
+  }
+  // Texts finished before this tab registered (or on an earlier visit) are sent now; later ones are relayed as they finish.
+  try {
+    const reply = await engineCall({ type: "eng:texts", pageId });
+    for (const { bubbleId, text } of (reply && reply.texts) || []) {
+      chrome.tabs.sendMessage(tabId, { type: "am:bubble-text", pageId, bubbleId, text }).catch(() => {});
+    }
+  } catch {
+    // the engine is not reachable right now: the watcher is registered and new texts still arrive
+  }
 }
+
+// The performance mode content scripts act on: "prefetch" or "on-demand". Nothing else of the settings leaves the worker.
+async function perfMode() {
+  const { perfMode: pref } = await getSettings();
+  if (pref === "prefetch" || pref === "on-demand") return pref;
+  const { benchmark } = await chrome.storage.local.get("benchmark");
+  return benchmark && benchmark.mode === "on-demand" ? "on-demand" : "prefetch";
+}
+
+// Sends msg to every open tab of an enabled site.
+async function toEnabledTabs(msg) {
+  for (const origin of await enabledOrigins()) {
+    for (const tab of await chrome.tabs.query({ url: `${origin}/*` })) {
+      chrome.tabs.sendMessage(tab.id, msg).catch(() => {});
+    }
+  }
+}
+
+chrome.storage.onChanged.addListener(async (changes, area) => {
+  if (area !== "local" || !(changes.settings || changes.benchmark)) return;
+  await toEnabledTabs({ type: "am:perf-mode", mode: await perfMode() });
+});
 
 // The PNG header holds the image width at bytes 16-19: no need to decode the screenshot here.
 function pngWidth(dataUrl) {
@@ -224,11 +260,16 @@ const handlers = {
     return { ok: true };
   },
   "am:prioritize": prioritize,
+  "am:perf-mode": async (msg, sender) => (sender.tab ? { ok: true, mode: await perfMode() } : { ok: false }),
   "am:engine": async (msg, sender) => (sender.tab ? { ok: false } : engineCall(msg.msg)), // panel only
   // Messages from the offscreen document (a content script must not be able to send these). The
   // offscreen document has no chrome.storage, so the worker reads and writes it on the engine's behalf.
   "eng:text": fromEngine(async (msg) => relayText(msg)),
-  "eng:model-status": fromEngine((msg) => chrome.storage.session.set({ modelStatus: msg.status })),
+  "eng:model-status": fromEngine(async (msg) => {
+    await chrome.storage.session.set({ modelStatus: msg.status });
+    // Pages that failed while the engine was down (or are waiting) try again.
+    if (msg.status && msg.status.state === "ready") await toEnabledTabs({ type: "am:retry" });
+  }),
   "eng:benchmark": fromEngine((msg) =>
     msg.benchmark ? chrome.storage.local.set({ benchmark: msg.benchmark }) : chrome.storage.local.remove("benchmark"),
   ),

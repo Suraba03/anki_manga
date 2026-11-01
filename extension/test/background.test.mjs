@@ -31,8 +31,13 @@ globalThis.chrome = {
   },
   permissions: { contains: async ({ origins }) => origins[0] !== "https://revoked.example/*" },
   storage: {
-    local: { get: async () => ({ enabledOrigins: ["https://reader.example", "https://revoked.example"] }), set: async () => {} },
+    local: {
+      get: async () => ({ enabledOrigins: ["https://reader.example", "https://revoked.example"] }),
+      set: async () => {},
+      setAccessLevel: async () => {},
+    },
     session: { get: async () => ({}), set: async () => {} },
+    onChanged: listeners(),
   },
   scripting: {
     getRegisteredContentScripts: async () => [],

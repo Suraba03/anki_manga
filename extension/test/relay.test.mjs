@@ -12,6 +12,9 @@ let granted = true;
 let engineReply = (msg) => ({ ok: true });
 let screenshot;
 let manifest = { name: "x" }; // an unpacked extension has no update_url
+let tabsAt = {}; // match pattern -> tabs returned by chrome.tabs.query
+const accessLevels = [];
+const storageChanged = [];
 
 const area = (data) => ({
   remove: async (key) => delete data[key],
@@ -37,14 +40,18 @@ globalThis.chrome = {
   tabs: {
     onRemoved: { addListener: (fn) => tabEvents.removed.push(fn) },
     onUpdated: { addListener: (fn) => tabEvents.updated.push(fn) },
-    query: async () => [],
+    query: async ({ url }) => tabsAt[url] || [],
     sendMessage: async (tabId, msg) => {
       toTabs.push([tabId, msg]);
     },
     captureVisibleTab: async () => screenshot,
   },
   permissions: { contains: async () => granted },
-  storage: { local: area(store.local), session: area(store.session) },
+  storage: {
+    local: { ...area(store.local), setAccessLevel: async (opts) => accessLevels.push(opts) },
+    session: area(store.session),
+    onChanged: { addListener: (fn) => storageChanged.push(fn) },
+  },
   scripting: {},
 };
 
@@ -62,6 +69,7 @@ async function startWorker(tag) {
 const tab = (id) => ({ tab: { id, windowId: 1 } });
 const reset = () => {
   toTabs.length = toOffscreen.length = 0;
+  tabsAt = {};
   engineReply = () => ({ ok: true });
   granted = true;
   for (const k of Object.keys(store.session)) delete store.session[k];
@@ -121,7 +129,8 @@ test("after a restart a hover still re-requests: prioritize is sent and the watc
   const send = await startWorker("hover-2");
   await send({ type: "am:prioritize", pageId: "P", bubbleId: 2 }, tab(5));
   await send({ type: "am:watch", pageId: "P" }, tab(5));
-  assert.deepEqual(toOffscreen.at(-1), { target: "offscreen", type: "eng:prioritize", pageId: "P", bubbleId: 2 });
+  // am:watch now also asks the engine for the page's finished texts (eng:texts), so prioritize is no longer the last message.
+  assert.deepEqual(toOffscreen.filter((m) => m.type === "eng:prioritize").at(-1), { target: "offscreen", type: "eng:prioritize", pageId: "P", bubbleId: 2 });
   await send(textMsg("P", 2, "next"));
   assert.deepEqual(toTabs, [[5, { type: "am:bubble-text", pageId: "P", bubbleId: 2, text: "next" }]]);
 });
@@ -252,4 +261,94 @@ test("devModelBase is handed to the engine only for an unpacked extension", asyn
   manifest = { name: "x", update_url: "https://clients2.google.com/service/update2/crx" };
   assert.deepEqual(await send({ type: "eng:dev-config" }), { devModelBase: null });
   manifest = { name: "x" };
+});
+
+// --- final review fixes ---------------------------------------------------------------------
+
+test("am:watch replays the texts the engine already finished for that page, to the watching tab only", async () => {
+  reset();
+  engineReply = (msg) =>
+    msg.type === "eng:texts"
+      ? { ok: true, texts: [{ bubbleId: 0, text: "あ" }, { bubbleId: 2, text: "い" }] }
+      : { ok: true };
+  const send = await startWorker("replay");
+  await send({ type: "am:watch", pageId: "P" }, tab(7));
+  assert.deepEqual(toOffscreen.at(-1), { target: "offscreen", type: "eng:texts", pageId: "P" });
+  assert.deepEqual(toTabs, [
+    [7, { type: "am:bubble-text", pageId: "P", bubbleId: 0, text: "あ" }],
+    [7, { type: "am:bubble-text", pageId: "P", bubbleId: 2, text: "い" }],
+  ]);
+});
+
+test("a tab that is already registered gets the replay again when it re-attaches the page (revisit)", async () => {
+  reset();
+  engineReply = (msg) => (msg.type === "eng:texts" ? { ok: true, texts: [{ bubbleId: 1, text: "う" }] } : { ok: true });
+  const send = await startWorker("revisit");
+  await send({ type: "am:watch", pageId: "P" }, tab(7));
+  toTabs.length = 0;
+  await send({ type: "am:watch", pageId: "P" }, tab(7));
+  assert.deepEqual(toTabs, [[7, { type: "am:bubble-text", pageId: "P", bubbleId: 1, text: "う" }]]);
+});
+
+test("a failing engine lookup does not break am:watch", async () => {
+  reset();
+  engineReply = () => {
+    throw new Error("offscreen gone");
+  };
+  const send = await startWorker("replay-fail");
+  assert.deepEqual(await send({ type: "am:watch", pageId: "P" }, tab(7)), { ok: true });
+  await send(textMsg("P", 0, "later"));
+  assert.equal(toTabs.length, 1, "the watcher is still registered");
+});
+
+test("am:perf-mode hands a content script the effective mode only, never the settings or the API key", async () => {
+  reset();
+  const send = await startWorker("perf");
+  store.local.settings = { perfMode: "auto", installId: "i", llm: { mode: "own", apiKey: "sk-secret", baseUrl: "https://x.example" } };
+  assert.deepEqual(await send({ type: "am:perf-mode" }, tab(1)), { ok: true, mode: "prefetch" });
+  store.local.benchmark = { msPerPage: 9000, mode: "on-demand", ep: "wasm" };
+  assert.deepEqual(await send({ type: "am:perf-mode" }, tab(1)), { ok: true, mode: "on-demand" });
+  store.local.settings.perfMode = "prefetch";
+  const reply = await send({ type: "am:perf-mode" }, tab(1));
+  assert.deepEqual(reply, { ok: true, mode: "prefetch" });
+  assert.ok(!JSON.stringify(reply).includes("sk-secret"));
+});
+
+test("a settings change is pushed to the tabs of enabled sites as the mode only (no API key)", async () => {
+  reset();
+  await startWorker("perf-push");
+  store.local.enabledOrigins = ["https://reader.example"];
+  store.local.settings = { perfMode: "on-demand", llm: { apiKey: "sk-secret" } };
+  tabsAt["https://reader.example/*"] = [{ id: 3 }, { id: 4 }];
+  const changed = storageChanged.at(-1);
+  await changed({ settings: { newValue: store.local.settings } }, "local");
+  await changed({ somethingElse: {} }, "local"); // ignored
+  await changed({ settings: { newValue: {} } }, "session"); // ignored
+  await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(toTabs, [
+    [3, { type: "am:perf-mode", mode: "on-demand" }],
+    [4, { type: "am:perf-mode", mode: "on-demand" }],
+  ]);
+  assert.ok(!JSON.stringify(toTabs).includes("sk-secret"));
+});
+
+test("storage.local is closed to content scripts (trusted contexts only) every time the worker starts", async () => {
+  reset();
+  accessLevels.length = 0;
+  await startWorker("access");
+  assert.deepEqual(accessLevels, [{ accessLevel: "TRUSTED_CONTEXTS" }]);
+});
+
+test("when the engine becomes ready, tabs of enabled sites are told to retry their failed pages", async () => {
+  reset();
+  const send = await startWorker("ready-retry");
+  store.local.enabledOrigins = ["https://reader.example"];
+  tabsAt["https://reader.example/*"] = [{ id: 3 }];
+  await send({ type: "eng:model-status", status: { state: "downloading", progress: 0.5 } });
+  assert.equal(toTabs.length, 0);
+  await send({ type: "eng:model-status", status: { state: "ready", progress: 1, ep: "wasm", mode: "prefetch" } });
+  assert.deepEqual(toTabs, [[3, { type: "am:retry" }]]);
+  toTabs.length = 0;
+  await send({ type: "eng:model-status", status: { state: "ready", progress: 1 } }, tab(9)); // forged by a tab
+  assert.equal(toTabs.length, 0);
 });

@@ -10,6 +10,7 @@ import { createTokenizer } from "../lib/tokenizer.js";
 import { bubbleReply } from "../engine/bubble.js";
 import { findPanelBox, cropJpeg } from "../engine/panel-crop.js";
 import { Dictionary } from "../lib/dictionary.js";
+import { acceptSender, engineHandlers, isDevBuild } from "../engine/trust.js";
 
 configureOrt(ort);
 
@@ -338,12 +339,18 @@ async function engineClear() {
   return { ok: true };
 }
 
-const handlers = {
-  "eng:probe-webgpu": probeWebgpu,
-  "eng:probe-fetch": probeFetch,
-  "eng:probe-anki": probeAnki,
+// The texts of a page that are already known (persisted), for a tab that starts watching it late.
+async function engineTexts({ pageId }) {
+  store ||= await openStore(indexedDB);
+  const page = await store.getPage(pageId);
+  const texts = page ? page.bubbles.filter((b) => b.text != null).map((b) => ({ bubbleId: b.id, text: b.text })) : [];
+  return { ok: true, texts };
+}
+
+const common = {
   "eng:page": enginePage,
   "eng:prioritize": enginePrioritize,
+  "eng:texts": engineTexts,
   "eng:bubble": engineBubble,
   "eng:crop": engineCrop,
   "eng:lookup": engineLookup,
@@ -351,14 +358,33 @@ const handlers = {
   "eng:status": async () => ({ ok: true, ...status }),
   "eng:clear": engineClear,
 };
+const probes = {
+  "eng:probe-webgpu": probeWebgpu,
+  "eng:probe-fetch": probeFetch,
+  "eng:probe-anki": probeAnki,
+};
+
+// An offscreen document has no chrome.runtime.getManifest: read the extension's own manifest file. Any failure
+// counts as the Store build (the stricter rules).
+const devBuild = fetch(chrome.runtime.getURL("manifest.json"))
+  .then((r) => r.json())
+  .then(isDevBuild)
+  .catch(() => false);
 
 boot();
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || msg.target !== "offscreen") return false;
-  const handler = handlers[msg.type];
-  if (!handler) return false;
-  handler(msg)
+  const trust = { id: chrome.runtime.id, root: chrome.runtime.getURL("") };
+  // Content scripts (a page URL) and other extensions never pass, in any build.
+  if (!acceptSender(sender, { ...trust, dev: true })) return false;
+  (async () => {
+    const dev = await devBuild;
+    // Store build: the service worker only. Unpacked: other pages of the extension too (the e2e harness).
+    if (!acceptSender(sender, { ...trust, dev })) return { ok: false };
+    const handler = engineHandlers(common, probes, dev)[msg.type];
+    return handler ? handler(msg) : { ok: false, error: "unknown_message" };
+  })()
     .then(sendResponse)
     .catch((e) => sendResponse({ ok: false, error: String((e && e.message) || e) }));
   return true;
