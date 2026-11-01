@@ -23,3 +23,6 @@ extension/node_modules/
 
 # development notes (specs, plans): kept local
 docs/superpowers/
+
+# agent rules: kept local
+CLAUDE.md
