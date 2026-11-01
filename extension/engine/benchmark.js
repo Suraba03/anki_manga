@@ -22,7 +22,10 @@ export function makeBenchmarkPage() {
 }
 
 // engine: {detect(rgba), ocr(rgba, bubble)}. msPerPage = detect + 12 x one OCR (a page holds about 12 bubbles).
+// One untimed warm-up pass first: the first run includes shader/graph compilation, which would skew the result.
 export async function runBenchmark(engine, rgba, { now = () => performance.now() } = {}) {
+  const warm = await engine.detect(rgba);
+  await engine.ocr(rgba, warm[0] ?? { box: FALLBACK_BOX });
   const t0 = now();
   const bubbles = await engine.detect(rgba);
   const t1 = now();

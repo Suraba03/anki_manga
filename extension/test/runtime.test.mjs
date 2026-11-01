@@ -60,7 +60,7 @@ test("runBenchmark: detect 1000 ms + 12 x ocr 200 ms -> 3400, prefetch", async (
   const f = fakeEngine({ detectMs: 1000, ocrMs: 200 });
   const r = await runBenchmark(f.engine, { data: new Uint8ClampedArray(4), width: 1, height: 1 }, { now: f.now });
   assert.deepEqual(r, { msPerPage: 3400, mode: "prefetch" });
-  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls.length, 2); // one untimed warm-up OCR + one timed OCR
   assert.deepEqual(f.calls[0].box, [1, 2, 3, 4]);
 });
 
@@ -83,6 +83,19 @@ test("runBenchmark: no detected bubble -> OCR on a fixed box inside the page", a
   assert.deepEqual(r, { msPerPage: 220, mode: "prefetch" });
   const [x1, y1, x2, y2] = f.calls[0].box;
   assert.ok(x1 >= 0 && y1 >= 0 && x2 <= page.width && y2 <= page.height && x2 > x1 && y2 > y1);
+});
+
+test("runBenchmark: an untimed warm-up (detect + ocr) runs first and is not counted", async () => {
+  let t = 0, detects = 0;
+  const calls = [];
+  const engine = {
+    detect: async () => { t += detects++ === 0 ? 5000 : 1000; return [{ box: [1, 2, 3, 4] }]; },
+    ocr: async (rgba, bubble) => { calls.push(bubble); t += 200; return "x"; },
+  };
+  const r = await runBenchmark(engine, makeBenchmarkPage(), { now: () => t });
+  assert.deepEqual(r, { msPerPage: 3400, mode: "prefetch" });
+  assert.equal(detects, 2);
+  assert.equal(calls.length, 2);
 });
 
 test("makeBenchmarkPage: 1000x1400 RGBA, white with dark text-like regions", () => {

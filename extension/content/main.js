@@ -12,7 +12,7 @@
 
   const RETRY_DELAYS = [2000, 4000, 8000];
   const RETRY_LATER = 15000;
-  const RETRYABLE = new Set(["warming", "helper_unreachable"]);
+  const RETRYABLE = new Set(["models_downloading", "models_loading"]);
 
   const results = new Map(); // pageKey -> Promise<am:page response> (cached, so re-shown images reuse it)
   const byImg = new Map(); // img -> {key, handle}
@@ -149,18 +149,51 @@
     return true; // lazy placeholder: the background checks the real size after fetching
   }
 
-  const io = new IntersectionObserver(
-    (entries) => {
-      for (const e of entries) {
-        if (e.isIntersecting && candidate(e.target)) processImage(e.target);
-      }
-    },
-    { rootMargin: "150% 0px" },
-  );
+  // Prefetch starts a page well before it scrolls into view; on-demand (slow machines) only
+  // starts pages that are at least half visible.
+  const IO_OPTIONS = {
+    prefetch: { rootMargin: "150% 0px" },
+    "on-demand": { rootMargin: "0px", threshold: 0.5 },
+  };
+  const imgs = new Set(); // watched <img> elements, to re-observe when the mode changes
+  let perfMode = "prefetch";
+  let io = makeObserver(perfMode);
+
+  function makeObserver(mode) {
+    return new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting && candidate(e.target)) processImage(e.target);
+        }
+      },
+      IO_OPTIONS[mode],
+    );
+  }
+
+  function effectiveMode({ settings, benchmark } = {}) {
+    const pref = settings && settings.perfMode;
+    if (pref === "prefetch" || pref === "on-demand") return pref;
+    return benchmark && benchmark.mode === "on-demand" ? "on-demand" : "prefetch";
+  }
+
+  function applyMode(mode) {
+    if (mode === perfMode) return;
+    perfMode = mode;
+    io.disconnect();
+    io = makeObserver(mode);
+    for (const img of imgs) if (img.isConnected) io.observe(img);
+  }
+
+  chrome.storage.local.get(["settings", "benchmark"]).then((v) => applyMode(effectiveMode(v)), () => {});
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local" || !(changes.settings || changes.benchmark)) return;
+    chrome.storage.local.get(["settings", "benchmark"]).then((v) => applyMode(effectiveMode(v)), () => {});
+  });
 
   function watch(img) {
     if (img.__amWatched) return;
     img.__amWatched = true;
+    imgs.add(img);
     io.observe(img);
   }
 
@@ -181,6 +214,7 @@
           setState(img, null);
           byImg.delete(img);
           io.unobserve(img);
+          imgs.delete(img);
           img.__amWatched = false;
         }
         watch(img);

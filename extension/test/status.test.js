@@ -13,8 +13,8 @@ test("badge counts recognized bubbles, then turns into a fading check", () => {
 });
 
 test("badge explains errors and stays", () => {
-  assert.deepEqual(Status.badge({ phase: "error", error: "helper_unreachable" }), {
-    text: "⚠ helper not running",
+  assert.deepEqual(Status.badge({ phase: "error", error: "engine_error" }), {
+    text: "⚠ recognition failed — see the side panel",
     kind: "error",
   });
   assert.deepEqual(Status.badge({ phase: "error", error: "extension_reloaded" }), {
@@ -24,8 +24,21 @@ test("badge explains errors and stays", () => {
   assert.equal(Status.badge({ phase: "error", error: "weird" }).text, "⚠ weird");
 });
 
-test("helper still starting is shown as busy, not as an error", () => {
-  assert.deepEqual(Status.badge({ phase: "error", error: "warming" }), { text: "⏳ helper starting…", kind: "busy" });
+test("engine still preparing models is shown as busy, not as an error", () => {
+  assert.deepEqual(Status.badge({ phase: "error", error: "models_downloading" }), {
+    text: "⏳ downloading models…",
+    kind: "busy",
+  });
+  assert.deepEqual(Status.badge({ phase: "error", error: "models_loading" }), {
+    text: "⏳ loading models…",
+    kind: "busy",
+  });
+});
+
+test("v1 helper codes are gone and fall back to the raw code", () => {
+  for (const code of ["helper_unreachable", "bad_token", "warming"]) {
+    assert.deepEqual(Status.badge({ phase: "error", error: code }), { text: `⚠ ${code}`, kind: "error" });
+  }
 });
 
 test("no badge for images that aren't manga pages", () => {
@@ -41,7 +54,7 @@ test("summary for the panel", () => {
     { phase: "detecting" },
     { phase: "error", error: "fetch_failed" },
     { phase: "error", error: "not_manga" },
-    { phase: "error", error: "warming" },
+    { phase: "error", error: "models_loading" },
   ]);
   assert.deepEqual(s, { ready: 2, working: 3, failed: 1 });
   assert.equal(Status.summaryText(s), "Pages: 2 ready · 3 recognizing · 1 failed");
