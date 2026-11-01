@@ -6,10 +6,32 @@ export const CONTENT_FILES = ["content/page-finder.js", "content/layout.js", "co
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+  restoreSites();
 });
 chrome.runtime.onStartup.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+  restoreSites();
 });
+
+function scriptFor(origin) {
+  return { id: `am:${origin}`, matches: [`${origin}/*`], js: CONTENT_FILES, persistAcrossSessions: true, runAt: "document_idle" };
+}
+
+// Updating/reloading the extension clears dynamically registered content scripts, and the
+// scripts already running in open tabs lose their connection. Re-register every enabled site
+// and inject a fresh copy into its open tabs (main.js retires the stale copy).
+export async function restoreSites() {
+  for (const origin of await enabledOrigins()) {
+    if (!(await chrome.permissions.contains({ origins: [`${origin}/*`] }))) continue;
+    const id = `am:${origin}`;
+    const existing = await chrome.scripting.getRegisteredContentScripts({ ids: [id] });
+    if (existing.length) await chrome.scripting.unregisterContentScripts({ ids: [id] });
+    await chrome.scripting.registerContentScripts([scriptFor(origin)]);
+    for (const tab of await chrome.tabs.query({ url: `${origin}/*` })) {
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: CONTENT_FILES }).catch(() => {});
+    }
+  }
+}
 
 async function enabledOrigins() {
   return (await chrome.storage.local.get("enabledOrigins")).enabledOrigins || [];
@@ -19,9 +41,7 @@ async function enableSite(origin, tabId) {
   const id = `am:${origin}`;
   const existing = await chrome.scripting.getRegisteredContentScripts({ ids: [id] });
   if (existing.length) await chrome.scripting.unregisterContentScripts({ ids: [id] });
-  await chrome.scripting.registerContentScripts([
-    { id, matches: [`${origin}/*`], js: CONTENT_FILES, persistAcrossSessions: true, runAt: "document_idle" },
-  ]);
+  await chrome.scripting.registerContentScripts([scriptFor(origin)]);
   const origins = new Set(await enabledOrigins());
   origins.add(origin);
   await chrome.storage.local.set({ enabledOrigins: [...origins] });
