@@ -27,6 +27,20 @@ test("chooseBackend: no GPU -> wasm without trying webgpu", async () => {
   assert.equal(calls, 0);
 });
 
+test("chooseBackend: releases the probe session on success", async () => {
+  let released = 0;
+  const ep = await chooseBackend({ hasGpu: true, createSession: async () => ({ release: async () => { released++; } }) });
+  assert.equal(ep, "webgpu");
+  assert.equal(released, 1);
+});
+
+test("chooseBackend: configures ORT before probing when ort is given", async () => {
+  const ort = { env: { wasm: {} } };
+  let seen;
+  await chooseBackend({ ort, hasGpu: true, createSession: async () => { seen = ort.env.wasm.numThreads; return {}; } });
+  assert.ok(seen >= 1 && seen <= 4);
+});
+
 // Fake engine on an injected clock: detect/ocr advance the clock by a fixed amount.
 function fakeEngine({ detectMs, ocrMs, bubbles = [{ box: [1, 2, 3, 4] }] }) {
   let t = 0;
@@ -86,26 +100,23 @@ test("makeBenchmarkPage: 1000x1400 RGBA, white with dark text-like regions", () 
   assert.ok(dark > 1000);
 });
 
-test("configureOrt: wasm threads capped at 4, wasmPaths only with chrome.runtime", () => {
+test("configureOrt: threads capped at 4, wasmPaths only with chrome.runtime, for every backend", () => {
   const saved = { chrome: globalThis.chrome, nav: Object.getOwnPropertyDescriptor(globalThis, "navigator") };
   try {
     Object.defineProperty(globalThis, "navigator", { value: { hardwareConcurrency: 16 }, configurable: true });
     delete globalThis.chrome;
     let ort = { env: { wasm: {} } };
-    configureOrt(ort, "wasm");
+    configureOrt(ort);
     assert.equal(ort.env.wasm.numThreads, 4);
     assert.equal(ort.env.wasm.wasmPaths, undefined);
 
     Object.defineProperty(globalThis, "navigator", { value: { hardwareConcurrency: 2 }, configurable: true });
     globalThis.chrome = { runtime: { getURL: (p) => `chrome-extension://id/${p}` } };
     ort = { env: { wasm: {} } };
-    configureOrt(ort, "wasm");
+    configureOrt(ort);
+    configureOrt(ort); // idempotent
     assert.equal(ort.env.wasm.numThreads, 2);
     assert.equal(ort.env.wasm.wasmPaths, "chrome-extension://id/vendor/ort/");
-
-    ort = { env: { wasm: {} } };
-    configureOrt(ort, "webgpu");
-    assert.equal(ort.env.wasm.numThreads, undefined);
   } finally {
     if (saved.chrome === undefined) delete globalThis.chrome; else globalThis.chrome = saved.chrome;
     if (saved.nav) Object.defineProperty(globalThis, "navigator", saved.nav);
@@ -113,8 +124,9 @@ test("configureOrt: wasm threads capped at 4, wasmPaths only with chrome.runtime
 });
 
 // A fake ORT that records session options and run inputs; tensors are plain {type,data,dims}.
-function fakeOrt() {
+function fakeOrt({ failOnByte } = {}) {
   const created = [];
+  const released = [];
   const log = [];
   let active = 0, maxActive = 0;
   class Tensor { constructor(type, data, dims) { this.type = type; this.data = data; this.dims = dims; } }
@@ -125,7 +137,10 @@ function fakeOrt() {
       create: async (bytes, opts) => {
         const id = created.length;
         created.push({ bytes, opts });
+        await new Promise((r) => setTimeout(r, 1));
+        if (new Uint8Array(bytes)[0] === failOnByte) throw new Error("create failed");
         return {
+          release: async () => { released.push(id); },
           run: async (feeds) => {
             active++; maxActive = Math.max(maxActive, active);
             log.push({ id, feeds });
@@ -149,7 +164,7 @@ function fakeOrt() {
       },
     },
   };
-  return { ort, created, log, maxActive: () => maxActive };
+  return { ort, created, released, log, maxActive: () => maxActive };
 }
 
 const enc = (s) => new TextEncoder().encode(s).buffer;
@@ -194,6 +209,23 @@ test("createEngine: a failing call does not block later calls", async () => {
   const page = { data: new Uint8ClampedArray(64 * 64 * 4).fill(255), width: 64, height: 64 };
   await assert.rejects(engine.ocr(page, { box: [500, 500, 600, 600] })); // empty crop
   assert.equal(await engine.ocr(page, { box: [0, 0, 32, 32] }), "");
+});
+
+test("createEngine: failed session creation releases the ones that succeeded and rejects", async () => {
+  const f = fakeOrt({ failOnByte: 2 }); // encoder fails
+  await assert.rejects(
+    createEngine(f.ort, "webgpu", { det: bytes(1), enc: bytes(2), dec: bytes(3), vocab: enc("a") }),
+    /create failed/,
+  );
+  assert.deepEqual([...f.released].sort(), [0, 2]);
+});
+
+test("createEngine: dispose releases all three sessions", async () => {
+  const f = fakeOrt();
+  const engine = await createEngine(f.ort, "wasm", { det: bytes(1), enc: bytes(2), dec: bytes(3), vocab: enc("a") });
+  assert.deepEqual(f.released, []);
+  await engine.dispose();
+  assert.deepEqual([...f.released].sort(), [0, 1, 2]);
 });
 
 // Optional real-model check (wasm set, onnxruntime-node). Needs ANKI_MANGA_MODELS.

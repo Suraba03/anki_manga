@@ -5,32 +5,43 @@ import { ocrBubble } from "./ocr.js";
 export { runBenchmark } from "./benchmark.js";
 
 // Tries a detector session on WebGPU; any failure (or no GPU) means the WASM CPU backend.
-// createSession(ep) is supplied by the caller and builds a detector session for that ep.
-export async function chooseBackend({ hasGpu, createSession }) {
+// createSession(ep) is supplied by the caller and builds a detector session for that ep; the probe is released.
+// ort (optional): configured via configureOrt before probing.
+export async function chooseBackend({ ort, hasGpu, createSession }) {
+  if (ort) configureOrt(ort);
   if (!hasGpu) return "wasm";
   try {
-    await createSession("webgpu");
+    const probe = await createSession("webgpu");
+    await probe?.release?.();
     return "webgpu";
   } catch {
     return "wasm";
   }
 }
 
-export function configureOrt(ort, ep) {
-  if (ep !== "wasm") return;
+// Applies to every backend: the WebGPU build also loads its JSEP wasm through env.wasm.wasmPaths. Idempotent.
+export function configureOrt(ort) {
   ort.env.wasm.numThreads = Math.min(4, globalThis.navigator?.hardwareConcurrency || 1);
     if (globalThis.chrome?.runtime?.getURL) ort.env.wasm.wasmPaths = globalThis.chrome.runtime.getURL("vendor/ort/");
 }
 
 // files: {det, enc, dec: ArrayBuffer (model bytes), vocab: ArrayBuffer (vocab.txt)}.
 export async function createEngine(ort, ep, files) {
-  configureOrt(ort, ep);
+  configureOrt(ort);
   const opts = { executionProviders: [ep], graphOptimizationLevel: "all" };
-  const [det, enc, dec] = await Promise.all([
+  const results = await Promise.allSettled([
     ort.InferenceSession.create(files.det, opts),
     ort.InferenceSession.create(files.enc, opts),
     ort.InferenceSession.create(files.dec, opts),
   ]);
+  const sessions = results.filter((r) => r.status === "fulfilled").map((r) => r.value);
+  const release = () => Promise.allSettled(sessions.map((s) => s.release?.()));
+  const failed = results.find((r) => r.status === "rejected");
+  if (failed) {
+    await release(); // a retry on another backend must not leave sessions behind
+    throw failed.reason;
+  }
+  const [det, enc, dec] = sessions;
   const vocab = new TextDecoder().decode(files.vocab).split("\n");
 
   const runModel = async (tensor) => {
@@ -59,6 +70,7 @@ export async function createEngine(ort, ep, files) {
 
   return {
     ep,
+    dispose: release,
     detect: (rgba) => serial(() => detectPage(runModel, rgba)),
     ocr: (rgba, bubble) => serial(() => ocrBubble(runEncoder, runDecoder, vocab, rgba, bubble)),
   };
