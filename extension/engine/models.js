@@ -38,35 +38,43 @@ async function sha256Hex(buf) {
   return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-// Reads the whole body, reporting each chunk's length through onBytes.
-async function readBody(res, onBytes) {
+// Reads the body into a buffer preallocated from the manifest size, reporting each chunk through onBytes.
+// A body longer than `size` is cut off (reader cancelled) and rejected as model_corrupt, so memory stays bounded.
+async function readBody(res, size, onBytes) {
+  const out = new Uint8Array(size);
+  let at = 0;
+  const take = (chunk) => {
+    if (at + chunk.length > size) return false;
+    out.set(chunk, at);
+    at += chunk.length;
+    onBytes(chunk.length);
+    return true;
+  };
   if (!res.body || !res.body.getReader) {
-    const buf = await res.arrayBuffer();
-    onBytes(buf.byteLength);
-    return new Uint8Array(buf);
+    if (!take(new Uint8Array(await res.arrayBuffer()))) throw new ModelError("model_corrupt", "longer than expected");
+    return { out, length: at };
   }
   const reader = res.body.getReader();
-  const chunks = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    total += value.length;
-    onBytes(value.length);
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!take(value)) {
+        await reader.cancel().catch(() => {});
+        throw new ModelError("model_corrupt", "longer than expected");
+      }
+    }
+  } catch (e) {
+    await reader.cancel().catch(() => {});
+    throw e;
   }
-  const out = new Uint8Array(total);
-  let at = 0;
-  for (const c of chunks) {
-    out.set(c, at);
-    at += c.length;
-  }
-  return out;
+  return { out, length: at };
 }
 
 // files: [{name,url,sha256,bytes}]. cache: {match,put,delete} (Cache Storage subset). Resolves to
 // Map<name, ArrayBuffer> of verified bytes. A cached file is re-hashed and dropped if it no longer matches.
-// Downloads are all-or-nothing: nothing is written to the cache unless every missing file verified.
+// Each file is cached as soon as it verifies (a later failure keeps the earlier ones: resume per file);
+// a file that fails verification is never stored.
 export async function ensureFiles(files, { cache, fetch: fetchFn = globalThis.fetch, onProgress = () => {} }) {
   const result = new Map();
   const missing = [];
@@ -86,32 +94,30 @@ export async function ensureFiles(files, { cache, fetch: fetchFn = globalThis.fe
   const totalBytes = missing.reduce((n, f) => n + f.bytes, 0);
   let received = 0;
   const report = () => onProgress(Math.min(received / totalBytes, 0.999));
-  const verified = [];
   for (const f of missing) {
-    let bytes;
+    let body;
     try {
       const res = await fetchFn(f.url);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      bytes = await readBody(res, (n) => {
+      if (!res.ok) {
+        await res.body?.cancel().catch(() => {});
+        throw new Error(`HTTP ${res.status}`);
+      }
+      body = await readBody(res, f.bytes, (n) => {
         received += n;
         report();
       });
     } catch (e) {
+      if (e instanceof ModelError) throw e;
       throw new ModelError("model_download_failed", `${f.name}: ${e?.message || e}`);
     }
-    const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-    if ((await sha256Hex(buf)) !== f.sha256) throw new ModelError("model_corrupt", f.name);
-    verified.push([f, buf]);
-  }
-
-  try {
-    for (const [f, buf] of verified) {
-      await cache.put(f.url, new Response(buf.slice(0)));
-      result.set(f.name, buf);
+    if (body.length !== f.bytes || (await sha256Hex(body.out)) !== f.sha256) throw new ModelError("model_corrupt", f.name);
+    try {
+      await cache.put(f.url, new Response(body.out));
+    } catch (e) {
+      await cache.delete(f.url).catch(() => {});
+      throw new ModelError("model_download_failed", `cache write failed: ${e?.message || e}`);
     }
-  } catch (e) {
-    for (const [f] of verified) await cache.delete(f.url).catch(() => {});
-    throw new ModelError("model_download_failed", `cache write failed: ${e?.message || e}`);
+    result.set(f.name, body.out.buffer);
   }
   onProgress(1);
   return new Map(files.map((f) => [f.name, result.get(f.name)]));

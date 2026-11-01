@@ -85,35 +85,112 @@ test("a cached file with the wrong hash is dropped and fetched again", async () 
   assert.deepEqual(new Uint8Array(cache.store.get(files[0].url)), A);
 });
 
-test("wrong bytes -> model_corrupt, nothing stored, the next call fetches again", async () => {
+test("wrong bytes -> model_corrupt; earlier verified files stay cached, the bad one is not stored, the next call fetches only it", async () => {
   const cache = fakeCache();
   const bad = { ...served(), [files[1].url]: bytesOf("evil-bytes-same-hash-no") };
   await assert.rejects(ensureFiles(files, { cache, fetch: fakeFetch(bad), onProgress() {} }), { error: "model_corrupt" });
-  assert.equal(cache.store.size, 0);
-  assert.equal(cache.puts, 0);
+  assert.deepEqual([...cache.store.keys()], [files[0].url]);
+  assert.equal(cache.puts, 1);
 
   const fetch = fakeFetch(served());
   const out = await ensureFiles(files, { cache, fetch, onProgress() {} });
-  assert.deepEqual(fetch.fetched, [files[0].url, files[1].url]);
+  assert.deepEqual(fetch.fetched, [files[1].url]);
   assert.equal(out.size, 2);
   assert.equal(cache.store.size, 2);
 });
 
-test("an HTTP error -> model_download_failed, nothing stored", async () => {
+test("same-length wrong bytes -> model_corrupt and the bad file is never stored", async () => {
+  const cache = fakeCache();
+  const evil = new Uint8Array(B.length).fill(7);
+  const bad = { ...served(), [files[1].url]: evil };
+  await assert.rejects(ensureFiles(files, { cache, fetch: fakeFetch(bad), onProgress() {} }), { error: "model_corrupt" });
+  assert.equal(cache.store.has(files[1].url), false);
+});
+
+test("an HTTP error -> model_download_failed, the failed file is not stored", async () => {
   const cache = fakeCache();
   const fetch = fakeFetch({ [files[0].url]: A }); // b.onnx -> 404
   await assert.rejects(ensureFiles(files, { cache, fetch, onProgress() {} }), { error: "model_download_failed" });
-  assert.equal(cache.store.size, 0);
+  assert.equal(cache.store.has(files[1].url), false);
 });
 
-test("a fetch that rejects -> model_download_failed, nothing stored", async () => {
+test("a fetch that rejects -> model_download_failed, the failed file is not stored", async () => {
   const cache = fakeCache();
   const fetch = async (url) => {
     if (url === files[1].url) throw new TypeError("network down");
     return new Response(A);
   };
   await assert.rejects(ensureFiles(files, { cache, fetch, onProgress() {} }), { error: "model_download_failed" });
-  assert.equal(cache.store.size, 0);
+  assert.equal(cache.store.has(files[1].url), false);
+});
+
+test("three files, third stream dies mid-way -> first two stay cached, retry fetches only the third", async () => {
+  const C = bytesOf("gamma-bytes-ZZZZZZZZZZZZZZZZZZZZZZZZ");
+  const three = [...files, entry("c.onnx", C)];
+  const cache = fakeCache();
+  const dying = async (url) => {
+    if (url === three[2].url) {
+      return new Response(
+        new ReadableStream({
+          start(c) {
+            c.enqueue(C.slice(0, 5));
+          },
+          pull() {
+            throw new Error("connection reset");
+          },
+        }),
+      );
+    }
+    return new Response(url === three[0].url ? A : B);
+  };
+  await assert.rejects(ensureFiles(three, { cache, fetch: dying, onProgress() {} }), { error: "model_download_failed" });
+  assert.deepEqual([...cache.store.keys()], [three[0].url, three[1].url]);
+
+  const fetch = fakeFetch({ [three[2].url]: C });
+  const out = await ensureFiles(three, { cache, fetch, onProgress() {} });
+  assert.deepEqual(fetch.fetched, [three[2].url]);
+  assert.equal(out.size, 3);
+  assert.equal(cache.store.size, 3);
+});
+
+test("an oversized body -> model_corrupt, reader cancelled, file not stored", async () => {
+  const cache = fakeCache();
+  let cancelled = false;
+  const fetch = async (url) => {
+    if (url !== files[1].url) return new Response(A);
+    return new Response(
+      new ReadableStream({
+        pull(c) {
+          c.enqueue(new Uint8Array(16)); // never ends: must be cut off at files[1].bytes
+        },
+        cancel() {
+          cancelled = true;
+        },
+      }),
+    );
+  };
+  await assert.rejects(ensureFiles(files, { cache, fetch, onProgress() {} }), { error: "model_corrupt" });
+  assert.equal(cancelled, true);
+  assert.equal(cache.store.has(files[1].url), false);
+});
+
+test("a non-OK response body is cancelled", async () => {
+  const cache = fakeCache();
+  let cancelled = false;
+  const fetch = async () =>
+    new Response(
+      new ReadableStream({
+        pull(c) {
+          c.enqueue(new Uint8Array(4));
+        },
+        cancel() {
+          cancelled = true;
+        },
+      }),
+      { status: 503 },
+    );
+  await assert.rejects(ensureFiles(files, { cache, fetch, onProgress() {} }), { error: "model_download_failed" });
+  assert.equal(cancelled, true);
 });
 
 test("a body stream that dies mid-way -> model_download_failed, nothing stored", async () => {
