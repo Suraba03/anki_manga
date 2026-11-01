@@ -49,19 +49,67 @@ export function linesFromMap(prob, w, h, opts = {}) {
     const score = sum / count;
     if (!(score > boxThresh)) continue;
 
-    // Unclip: round-joined offset of a rectangle has the rect grown by d on every side as min-area rect.
-    const quad = orderBox(boxPoints(rect));
+    // Unclip like Python: Polygon area/perimeter of the float min-area quad give the distance, then pyclipper
+    // offsets the quad truncated to integers (round joins), and the result's min-area rect is the box.
+    const quad = boxPoints(rect).map(([x, y]) => [Math.fround(x), Math.fround(y)]); // cv2 hands over float32
     const d = (polygonArea(quad) * unclipRatio) / polygonPerimeter(quad);
-    const grown = orderBox(boxPoints({
-      center: rect.center,
-      size: [rect.size[0] + 2 * d, rect.size[1] + 2 * d],
-      angle: rect.angle,
-    }));
+    const grown = orderBox(boxPoints(minAreaRect(offsetRound(quad.map(([x, y]) => [Math.trunc(x), Math.trunc(y)]), d))));
     const box = grown.map(([x, y]) => [
       Math.min(Math.max(Math.round(x), 0), w),
       Math.min(Math.max(Math.round(y), 0), h),
     ]);
     out.push({ box, score });
+  }
+  return out;
+}
+
+// Clipper (ClipperOffset, JT_ROUND, ArcTolerance 0.25) outline of a convex polygon grown by delta: unit edge
+// normals, every vertex rounded to an integer, round joins as arcs of equal angular steps.
+function offsetRound(poly, delta) {
+  const n = poly.length;
+  const cx = poly.reduce((a, p) => a + p[0], 0) / n, cy = poly.reduce((a, p) => a + p[1], 0) / n;
+  const normal = (a, b) => {
+    const dx = b[0] - a[0], dy = b[1] - a[1];
+    if (dx === 0 && dy === 0) return [0, 0];
+    const f = 1 / Math.sqrt(dx * dx + dy * dy);
+    return [dy * f, -dx * f];
+  };
+  const rnd = (v) => (v < 0 ? -Math.floor(-v + 0.5) : Math.floor(v + 0.5)); // Clipper Round()
+  // Clipper wants the outer path positively oriented; pick the direction whose normals point outwards.
+  const mid = [(poly[0][0] + poly[1][0]) / 2 - cx, (poly[0][1] + poly[1][1]) / 2 - cy];
+  const n0 = normal(poly[0], poly[1]);
+  const path = n0[0] * mid[0] + n0[1] * mid[1] >= 0 ? poly : [...poly].reverse();
+  const normals = path.map((p, i) => normal(p, path[(i + 1) % n]));
+
+  let steps = Math.PI / Math.acos(1 - 0.25 / Math.abs(delta));
+  if (steps > Math.abs(delta) * Math.PI) steps = Math.abs(delta) * Math.PI;
+  const sin = Math.sin((2 * Math.PI) / steps), cos = Math.cos((2 * Math.PI) / steps);
+  const stepsPerRad = steps / (2 * Math.PI);
+
+  const out = [];
+  let k = n - 1;
+  for (let j = 0; j < n; j++) {
+    const nj = normals[j], nk = normals[k];
+    const sinA = Math.max(-1, Math.min(1, nk[0] * nj[1] - nj[0] * nk[1]));
+    const cosA = nk[0] * nj[0] + nk[1] * nj[1];
+    const pt = path[j];
+    if (Math.abs(sinA * delta) < 1 && cosA > 0) {
+      out.push([rnd(pt[0] + nk[0] * delta), rnd(pt[1] + nk[1] * delta)]);
+    } else if (sinA * delta < 0) {
+      out.push([rnd(pt[0] + nk[0] * delta), rnd(pt[1] + nk[1] * delta)], [pt[0], pt[1]],
+        [rnd(pt[0] + nj[0] * delta), rnd(pt[1] + nj[1] * delta)]);
+    } else {
+      const m = Math.max(rnd(stepsPerRad * Math.abs(Math.atan2(sinA, cosA))), 1);
+      let x = nk[0], y = nk[1];
+      for (let i = 0; i < m; i++) {
+        out.push([rnd(pt[0] + x * delta), rnd(pt[1] + y * delta)]);
+        const x2 = x;
+        x = x * cos - sin * y;
+        y = x2 * sin + y * cos;
+      }
+      out.push([rnd(pt[0] + nj[0] * delta), rnd(pt[1] + nj[1] * delta)]);
+    }
+    k = j;
   }
   return out;
 }

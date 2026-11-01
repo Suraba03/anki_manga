@@ -93,3 +93,17 @@ test("a rotated rectangle blob gives its rect grown by the unclip distance", () 
   assert.ok(Math.abs(big - (rw + 2 * d)) <= 1.5, `long ${big} vs ${rw + 2 * d}`);
   assert.ok(Math.abs(small - (rh + 2 * d)) <= 1.5, `short ${small} vs ${rh + 2 * d}`);
 });
+
+// Python parity: boxes from the real SegDetectorRepresenter (pyclipper round-join unclip) on synthetic maps.
+// Fixture: tools/gen-dbnet-fixtures.py.
+test("linesFromMap matches SegDetectorRepresenter.boxes_from_bitmap", async () => {
+  const { readFileSync } = await import("node:fs");
+  const ref = JSON.parse(readFileSync(new URL("./fixtures/dbnet-reference.json", import.meta.url), "utf8"));
+  const sortKey = (b) => `${b[0][1]},${b[0][0]},${b[2][1]},${b[2][0]}`;
+  for (const [i, c] of ref.cases.entries()) {
+    const prob = Float32Array.from(c.prob, (ch) => Number(ch) / 10);
+    const got = linesFromMap(prob, ref.size, ref.size).map((l) => l.box).sort((a, b) => sortKey(a).localeCompare(sortKey(b)));
+    const want = [...c.boxes].sort((a, b) => sortKey(a).localeCompare(sortKey(b)));
+    assert.deepEqual(got, want, `case ${i}`);
+  }
+});

@@ -1,4 +1,5 @@
 // manga-ocr decoding and text post-processing (ports of manga_ocr/ocr.py post_process and HF greedy search).
+import { cropToOcrInput } from "./image.js";
 
 // Greedy decoding. runDecoder(ids) resolves to the logits for the next token (length = vocab size).
 // Returns the generated ids without the start token and without the end token.
@@ -59,4 +60,14 @@ export function postprocess(text) {
   text = text.replaceAll("…", "...");
   text = text.replace(/[・.]{2,}/g, (m) => ".".repeat(m.length));
   return h2z(text);
+}
+
+// OCR one bubble. runEncoder(pixels: Float32Array[3*224*224]) -> Promise<encoder output> (opaque, handed back to
+// runDecoder); runDecoder(ids: number[], encoderOutput) -> Promise<Float32Array> logits of the next token;
+// vocab: token strings by id. Throws "empty OCR crop" for a bubble outside the page.
+export async function ocrBubble(runEncoder, runDecoder, vocab, rgba, bubble) {
+  const hidden = await runEncoder(cropToOcrInput(rgba, bubble.box));
+  // start 2, end 3; max_length 300 counts the start token
+  const ids = await greedyDecode((seq) => runDecoder(seq, hidden), { start: 2, end: 3, maxLen: 299 });
+  return postprocess(tokensToText(ids, vocab));
 }
