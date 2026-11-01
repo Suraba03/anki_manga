@@ -29,3 +29,7 @@ CLAUDE.md
 tools/.cache/
 tools/e2e/.cache/
 /reference/
+
+# Free-tier server
+server/node_modules/
+server/.wrangler/

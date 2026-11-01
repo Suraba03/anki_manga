@@ -1,0 +1,32 @@
+name = "anki-manga-free"
+main = "src/worker.js"
+compatibility_date = "2026-10-01"
+
+[vars]
+DAILY_PER_INSTALL = "100"
+DAILY_PER_IP = "300"
+MONTHLY_CAP_USD = "10"
+# USD per token, DeepSeek Flash at PEAK rates (the dearer ones, so the cap errs on the safe side).
+# Source: https://api-docs.deepseek.com/quick_start/pricing (checked 2026-11-01), per 1M tokens:
+# cache hit $0.006, cache miss $0.30, output $1.20. Off-peak is half of that.
+# VERIFY before deploy: re-check the page and the model name below.
+PRICE_IN_HIT = "0.000000006"
+PRICE_IN_MISS = "0.0000003"
+PRICE_OUT = "0.0000012"
+# The pricing page now lists "deepseek-flash"; the extension's own-key path still sends "deepseek-chat".
+# VERIFY before deploy that this name is still accepted by the API.
+LLM_MODEL = "deepseek-chat"
+# Comma-separated. "chrome-extension://*" matches any extension until the Web Store ID is known;
+# then replace it with "chrome-extension://<store id>".
+ALLOWED_ORIGINS = "chrome-extension://*"
+# "1" lets requests without an Origin header through (curl). Keep "0" in production;
+# the local smoke test sets it with: wrangler dev --var ALLOW_NO_ORIGIN:1
+ALLOW_NO_ORIGIN = "0"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "anki-manga"
+# Placeholder: the owner pastes the id printed by `npx wrangler d1 create anki-manga`. Never commit the real one.
+database_id = "REPLACE_WITH_D1_ID"
+
+# Secrets (npx wrangler secret put ...): DEEPSEEK_API_KEY, IP_SALT. Never put them in this file.
