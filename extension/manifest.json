@@ -1,11 +1,19 @@
 {
   "manifest_version": 3,
-  "name": "anki_manga",
-  "version": "0.1.0",
+  "name": "Manga OCR & Mining for Anki",
+  "short_name": "Manga Mining",
+  "version": "0.2.0",
   "description": "Hover manga speech bubbles with Yomitan, click one for furigana, a grammar explanation and one-click Anki cards.",
   "minimum_chrome_version": "116",
-  "permissions": ["storage", "sidePanel", "scripting", "tabs"],
-  "host_permissions": ["http://127.0.0.1/*"],
+  "permissions": ["storage", "sidePanel", "scripting", "tabs", "offscreen"],
+  "content_security_policy": { "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'" },
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "https://api.deepseek.com/*",
+    "https://github.com/*",
+    "https://objects.githubusercontent.com/*",
+    "https://release-assets.githubusercontent.com/*"
+  ],
   "optional_host_permissions": ["*://*/*", "<all_urls>"],
   "background": { "service_worker": "background.js", "type": "module" },
   "side_panel": { "default_path": "panel/panel.html" },

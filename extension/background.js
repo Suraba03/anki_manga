@@ -59,6 +59,34 @@ async function disableSite(origin, tabId) {
   if (tabId != null) chrome.tabs.reload(tabId);
 }
 
+// --- offscreen engine host ----------------------------------------------------------
+// OCR runs in an offscreen document (the service worker cannot host WebGPU/WASM sessions).
+let offscreenReady = null;
+
+export function ensureOffscreen() {
+  offscreenReady ||= (async () => {
+    const open = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
+    if (open.length) return;
+    await chrome.offscreen.createDocument({
+      url: "offscreen/offscreen.html",
+      reasons: ["WORKERS"],
+      justification: "Runs the manga text recognition models",
+    });
+  })().finally(() => {
+    offscreenReady = null;
+  });
+  return offscreenReady;
+}
+
+export async function engineCall(msg) {
+  await ensureOffscreen();
+  return chrome.runtime.sendMessage({ target: "offscreen", ...msg });
+}
+
+// Test hook: the e2e harness evaluates in the service-worker global scope, where module
+// exports are not reachable (dynamic import() is disallowed in service workers).
+Object.assign(globalThis, { ensureOffscreen, engineCall });
+
 // --- page pipeline ------------------------------------------------------------------
 const MIN_SIDE = 400;
 const MIN_LONG_SIDE = 600;
