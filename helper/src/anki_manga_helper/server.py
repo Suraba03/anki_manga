@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from . import __version__
 from .anki import AnkiError, AnkiUnreachable
 from .boxes import Bubble
-from .config import Config, save_config
+from .config import Config, config_file, load_config, save_config
 from .deepseek import ExplainError
 from .engine import decode_image
 from .known import KnownWords
@@ -23,7 +23,7 @@ from .text import bold_word, ruby_html
 
 OPEN_PATHS = {("GET", "/health"), ("POST", "/pair")}
 RESET_HINT = "Run: anki-manga-helper --reset-pairing"
-EXPLAIN_STATUS = {"no_api_key": 400, "auth": 401}
+EXPLAIN_STATUS = {"no_api_key": 400, "auth": 401, "no_balance": 402, "rate_limited": 429}
 
 
 class SettingsBody(BaseModel):
@@ -61,6 +61,24 @@ def create_app(config: Config, engine, store, scheduler, anki, deepseek_factory:
     known: dict[str, KnownWords] = {}
     state = {"note_type_ready": False}
     lock = threading.Lock()
+    seen = {"mtime": None}
+
+    def sync_config() -> None:
+        """Pick up edits made on disk while running (e.g. `anki-manga-helper --reset-pairing`)."""
+        try:
+            mtime = config_file().stat().st_mtime_ns
+        except FileNotFoundError:
+            return
+        if mtime == seen["mtime"]:
+            return
+        fresh = load_config()
+        for field in ("token", "paired", "api_key", "deepseek_model"):
+            setattr(config, field, getattr(fresh, field))
+        seen["mtime"] = mtime
+
+    def persist() -> None:
+        save_config(config)
+        seen["mtime"] = config_file().stat().st_mtime_ns
 
     def cors(resp: Response, origin: str) -> Response:
         resp.headers["Access-Control-Allow-Origin"] = origin
@@ -83,6 +101,7 @@ def create_app(config: Config, engine, store, scheduler, anki, deepseek_factory:
             resp.headers["Access-Control-Allow-Headers"] = "Content-Type, X-AM-Token"
             resp.headers["Access-Control-Max-Age"] = "600"
             return cors(resp, origin)
+        sync_config()
         if (request.method, request.url.path) not in OPEN_PATHS and request.headers.get("x-am-token") != config.token:
             return cors(_err(401, "bad_token"), origin)
         return cors(await call_next(request), origin)
@@ -90,8 +109,10 @@ def create_app(config: Config, engine, store, scheduler, anki, deepseek_factory:
     # --- setup ------------------------------------------------------------------
     @app.get("/health")
     def health():
+        error = getattr(engine, "error", None)
         return {
-            "status": "ready" if engine.ready else "warming",
+            "status": "ready" if engine.ready else ("error" if error else "warming"),
+            "error": error,
             "version": __version__,
             "paired": config.paired,
             "has_api_key": bool(config.api_key),
@@ -103,7 +124,7 @@ def create_app(config: Config, engine, store, scheduler, anki, deepseek_factory:
             if config.paired:
                 return _err(409, "already_paired", hint=RESET_HINT)
             config.paired = True
-            save_config(config)
+            persist()
         return {"token": config.token}
 
     @app.get("/auth/check", status_code=204)
@@ -113,7 +134,7 @@ def create_app(config: Config, engine, store, scheduler, anki, deepseek_factory:
     @app.put("/settings")
     def settings(body: SettingsBody):
         config.api_key = body.api_key.strip() or None
-        save_config(config)
+        persist()
         return {"has_api_key": bool(config.api_key)}
 
     # --- pages ------------------------------------------------------------------
@@ -237,12 +258,12 @@ def create_app(config: Config, engine, store, scheduler, anki, deepseek_factory:
         picture = crop_jpeg(img, find_panel_box(img, bub["box"]))
         expl = store.get_explanation(store.explanation_key(text)) or {}
         fields = {
-            "Word": body.word,
-            "Reading": body.reading,
-            "Meaning": body.meaning,
+            "Word": html.escape(body.word),
+            "Reading": html.escape(body.reading),
+            "Meaning": html.escape(body.meaning),
             "Sentence": bold_word(text, body.word),
             "SentenceFurigana": ruby_html(text),
-            "SentenceTranslation": expl.get("translation", ""),
+            "SentenceTranslation": html.escape(expl.get("translation", "")),
             "Explanation": "".join(
                 f"<b>{html.escape(n['focus'])}</b> — {html.escape(n['explanation'])}<br>" for n in expl.get("notes", [])
             ),

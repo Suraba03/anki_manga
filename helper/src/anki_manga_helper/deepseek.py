@@ -85,6 +85,10 @@ class DeepSeekClient:
             raise ExplainError("network", str(e)) from e
         if resp.status_code in (401, 403):
             raise ExplainError("auth")
+        if resp.status_code == 402:
+            raise ExplainError("no_balance")
+        if resp.status_code == 429:
+            raise ExplainError("rate_limited")
         if resp.status_code != 200:
             raise ExplainError("bad_response", f"HTTP {resp.status_code}")
         try:

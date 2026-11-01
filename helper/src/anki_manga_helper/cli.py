@@ -14,7 +14,7 @@ def _reset_pairing() -> int:
     c.paired = False
     c.token = new_token()
     save_config(c)
-    print("Pairing reset. Open the anki_manga panel to reconnect.")
+    print("Pairing reset. Reopen the anki_manga panel to reconnect (a running helper picks this up automatically).")
     return 0
 
 

@@ -12,6 +12,7 @@ def make_bubbles(n):
 class FakeEngine:
     def __init__(self, n_bubbles=2, block_first=False):
         self.ready = True
+        self.error = None
         self.calls = []
         self.detect_calls = 0
         self.n_bubbles = n_bubbles

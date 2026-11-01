@@ -280,3 +280,57 @@ def test_cards_page_expired(env):
 def test_auth_check(env):
     assert env.client.get("/auth/check").status_code == 204
     assert env.client.get("/auth/check", headers={"X-AM-Token": "bad"}).status_code == 401
+
+
+# --- final-review fixes ------------------------------------------------------------
+
+def test_pair_after_reset_while_running(env):
+    from anki_manga_helper.cli import main
+    assert env.client.post("/pair").status_code == 200
+    main(["--reset-pairing"])  # run while the server object is alive
+    r = env.client.post("/pair")
+    assert r.status_code == 200
+    assert r.json()["token"] == cfg.load_config().token
+
+
+def test_settings_does_not_undo_reset(env):
+    from anki_manga_helper.cli import main
+    env.client.post("/pair")
+    main(["--reset-pairing"])
+    r = env.client.put("/settings", json={"api_key": "sk-2"}, headers={"X-AM-Token": cfg.load_config().token})
+    assert r.status_code == 200
+    assert cfg.load_config().api_key == "sk-2"
+    assert cfg.load_config().paired is False
+
+
+def test_cards_fields_escaped(env):
+    pid = env.page()["page_id"]
+    env.text(pid)
+    env.deepseek.explain = lambda text: {"translation": "<img src=x onerror=alert(1)>", "notes": [], "suggestions": []}
+    _explain(env, pid)
+    env.client.post("/cards", json={
+        "page_id": pid, "bubble_id": 0, "deck": "d", "word": "<b>w</b>", "reading": "a&b",
+        "meaning": "<script>x</script>", "source_url": "https://s", "source_title": "t"})
+    f = env.anki.added[0]["fields"]
+    assert f["Word"] == "&lt;b&gt;w&lt;/b&gt;"
+    assert f["Reading"] == "a&amp;b"
+    assert "<script>" not in f["Meaning"]
+    assert "<img" not in f["SentenceTranslation"]
+
+
+def test_health_reports_model_error(env):
+    env.engine.ready = False
+    env.engine.error = "download failed"
+    body = env.client.get("/health").json()
+    assert body["status"] == "error"
+    assert body["error"] == "download failed"
+
+
+@pytest.mark.parametrize("kind,status", [("no_balance", 402), ("rate_limited", 429)])
+def test_explain_balance_and_rate_statuses(env, kind, status):
+    pid = env.page()["page_id"]
+    env.text(pid)
+    env.deepseek.fail_with = ExplainError(kind)
+    r = _explain(env, pid)
+    assert r.status_code == status
+    assert r.json() == {"error": kind}

@@ -91,3 +91,10 @@ def test_success_sends_bearer():
     assert out["translation"] == GOOD["translation"]
     assert seen[0].headers["authorization"] == "Bearer sk-ok"
     assert str(seen[0].url) == "https://api.deepseek.com/chat/completions"
+
+
+@pytest.mark.parametrize("status,kind", [(402, "no_balance"), (429, "rate_limited")])
+def test_balance_and_rate_limit(status, kind):
+    with pytest.raises(ExplainError) as e:
+        DeepSeekClient("sk", "deepseek-chat", transport=_transport(status, {}, [])).explain("x")
+    assert e.value.kind == kind

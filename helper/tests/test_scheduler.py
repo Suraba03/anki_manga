@@ -107,3 +107,19 @@ def test_wait_text_prioritizes(st):
     waiter.join(5)
     assert result["t"] == "t3"
     assert eng.calls[:2] == [0, 3]
+
+
+def test_subscribe_after_done_replays_all(st):
+    # The extension opens the stream only when a page is displayed, possibly long after OCR finished.
+    eng = FakeEngine()
+    sch = OcrScheduler(eng, st)
+    sch.start()
+    bubbles = make_bubbles(3)
+    _save(st, "p", bubbles)
+    sch.enqueue_page("p", IMG, bubbles)
+    _wait_all(st, "p", 3)
+
+    async def collect():
+        return {bid: t async for bid, t in sch.subscribe("p")}
+
+    assert asyncio.run(asyncio.wait_for(collect(), 2)) == {0: "t0", 1: "t1", 2: "t2"}
