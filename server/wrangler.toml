@@ -30,3 +30,7 @@ database_name = "anki-manga"
 database_id = "REPLACE_WITH_D1_ID"
 
 # Secrets (npx wrangler secret put ...): DEEPSEEK_API_KEY, IP_SALT. Never put them in this file.
+
+# Daily retention cleanup (src/prune.js), 03:17 UTC.
+[triggers]
+crons = ["17 3 * * *"]

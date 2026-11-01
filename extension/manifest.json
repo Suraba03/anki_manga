@@ -3,7 +3,7 @@
   "name": "Manga OCR & Mining for Anki",
   "short_name": "Manga Mining",
   "version": "0.2.0",
-  "description": "Hover manga speech bubbles with Yomitan, click one for furigana, a grammar explanation and one-click Anki cards.",
+  "description": "OCR manga speech bubbles in your browser, then get furigana, a grammar explanation, dictionary entries and one-click Anki cards.",
   "minimum_chrome_version": "116",
   "permissions": ["storage", "sidePanel", "scripting", "tabs", "offscreen"],
   "content_security_policy": { "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'" },

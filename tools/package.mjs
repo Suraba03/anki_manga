@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Builds the Chrome Web Store upload: extension/ without test/, node_modules/, package*.json and dotfiles,
-// as <out>/manga-mining-<manifest version>.zip with manifest.json at the zip root. Uses the system `zip`.
+// as <out>/manga-mining-<manifest version>.zip with manifest.json at the zip root, plus the repo LICENSE (GPL-3.0) there. Uses the system `zip`.
 //   node tools/package.mjs [--out <dir>]   (default: dist/ in the repo; ANKI_MANGA_DIST also sets it)
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
@@ -38,4 +38,5 @@ mkdirSync(out, { recursive: true });
 rmSync(zip, { force: true });
 const files = listFiles();
 execFileSync("zip", ["-X", "-q", zip, "-@"], { cwd: EXTENSION, input: files.join("\n") + "\n" });
-console.log(`${zip}: ${files.length} files`);
+execFileSync("zip", ["-X", "-q", "-j", zip, join(ROOT, "LICENSE")]); // -j: at the zip root
+console.log(`${zip}: ${files.length + 1} files`);

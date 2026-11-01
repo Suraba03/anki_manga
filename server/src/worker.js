@@ -1,11 +1,13 @@
 // Cloudflare Worker entry: CORS, D1 adapter, DeepSeek call. The request logic is in explain.js.
 import { buildMessages } from "../../extension/lib/prompt.js";
+import { prune } from "./prune.js";
 import { handleExplain, parseConfig, originAllowed, describeError } from "./explain.js";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/chat/completions";
 const LLM_TIMEOUT_MS = 30000;
 const MAX_BODY_BYTES = 8192;
 const DEFAULT_MODEL = "deepseek-flash";
+const DAY_MS = 86400000;
 
 // Same request as the extension's own-key path. -> {result: message content, usage}
 export async function callDeepSeek(text, { apiKey, model = DEFAULT_MODEL, fetch: doFetch = fetch, timeoutMs = LLM_TIMEOUT_MS }) {
@@ -46,8 +48,14 @@ export function makeD1Db(d1, nowMs = Date.now) {
   const run = (sql, ...args) => d1.prepare(sql).bind(...args).run();
   return {
     getCache: async (key) => {
-      const row = await first("SELECT result FROM cache WHERE key = ?", key);
-      return row ? JSON.parse(row.result) : null;
+      const row = await first("SELECT result, created_at, last_used FROM cache WHERE key = ?", key);
+      if (!row) return null;
+      // Retention: remember a hit, but write at most once a day per row (best effort; a failure must not lose the hit).
+      const now = nowMs();
+      if (now - (row.last_used ?? row.created_at) > DAY_MS) {
+        await run("UPDATE cache SET last_used = ? WHERE key = ?", now, key).catch(() => {});
+      }
+      return JSON.parse(row.result);
     },
     putCache: (key, text, result) =>
       run("INSERT OR REPLACE INTO cache (key, text, result, created_at) VALUES (?, ?, ?, ?)", key, text, JSON.stringify(result), nowMs()),
@@ -135,4 +143,8 @@ export async function handle(request, env, deps = {}) {
 
 export default {
   fetch: (request, env) => handle(request, env),
+  // Daily cron (wrangler.toml [triggers]): retention cleanup.
+  scheduled: (_event, env, ctx) => {
+    ctx.waitUntil(prune(env).catch((e) => console.error("free tier: prune failed:", describeError(e))));
+  },
 };

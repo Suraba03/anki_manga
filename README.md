@@ -272,7 +272,7 @@ GPL-3.0-or-later (see [LICENSE](LICENSE)). Built on:
 - [manga-ocr](https://github.com/kha-white/manga-ocr) (Apache-2.0), the text recognition model, run as an ONNX model
 - [mokuro](https://github.com/kha-white/mokuro) (GPL-3.0), whose pipeline the first version of this project was built on
 - [JMdict](https://www.edrdg.org/edrdg/licence.html) by the Electronic Dictionary Research and Development Group (CC BY-SA 4.0), through [jmdict-simplified](https://github.com/scriptin/jmdict-simplified)
-- [kuromoji](https://github.com/takuyaa/kuromoji.js) (Apache-2.0), word splitting
+- [kuromoji](https://github.com/takuyaa/kuromoji.js) (Apache-2.0), word splitting, with the IPADIC dictionary (NAIST / ICOT licence; the notice is in `extension/vendor/kuromoji/NOTICE.md` and ships in the package)
 - [ONNX Runtime Web](https://github.com/microsoft/onnxruntime) (MIT), the inference engine
 
 Model weights and the dictionary are data downloaded at runtime from pinned URLs and verified by SHA-256; they are not part of the extension package. The exact sources and licences of each file are recorded in `extension/engine/models.manifest.json`.

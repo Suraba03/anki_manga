@@ -17,9 +17,10 @@ test("package.mjs writes dist/manga-mining-<version>.zip without tests, node_mod
     const zip = join(out, `manga-mining-${version}.zip`);
     assert.ok(existsSync(zip), "zip exists");
     const names = execFileSync("unzip", ["-Z1", zip], { encoding: "utf8", maxBuffer: 64 << 20 }).split("\n").filter(Boolean);
-    for (const want of ["manifest.json", "vendor/ort/ort.webgpu.min.mjs", "offscreen/offscreen.html"]) {
+    for (const want of ["LICENSE", "manifest.json", "vendor/ort/ort.webgpu.min.mjs", "offscreen/offscreen.html"]) {
       assert.ok(names.includes(want), `${want} is in the zip`);
     }
+    assert.equal(execFileSync("unzip", ["-p", zip, "LICENSE"], { encoding: "utf8" }), readFileSync(join(root, "LICENSE"), "utf8"), "the repo LICENSE is at the zip root");
     assert.ok(!names.some((n) => n.startsWith("extension/")), "files sit at the zip root, not under extension/");
     assert.ok(!names.some((n) => /(^|\/)test(\/|$)/.test(n)), "no test/ entry");
     assert.ok(!names.some((n) => /(^|\/)node_modules(\/|$)/.test(n)), "no node_modules/ entry");
