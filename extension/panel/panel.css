@@ -39,12 +39,8 @@ body {
 .status::before { content: "●"; margin-right: 5px; }
 .status[data-state="ready"]::before { color: var(--ok); }
 .status[data-state="warming"]::before { color: var(--warn); }
-.status[data-state="down"]::before, .status[data-state="pairing"]::before { color: var(--bad); }
-.banner {
-  margin: 10px 14px 0; padding: 8px 10px; border-radius: 6px;
-  background: color-mix(in srgb, var(--bad) 12%, var(--card)); border-left: 3px solid var(--bad);
-}
-.banner code { user-select: all; }
+.status[data-state="down"]::before { color: var(--bad); }
+.status-wrap { display: flex; align-items: center; gap: 8px; }
 .site { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 14px; }
 .site-name { color: var(--soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .btn {
@@ -81,6 +77,7 @@ h5 { margin: 12px 0 4px; font-size: 11px; letter-spacing: .06em; text-transform:
 .card.have { opacity: .55; }
 .card.have button, .card button:disabled { background: #999; cursor: default; }
 .skeleton { color: var(--muted); }
+.msg-detail { margin-top: 4px; font-size: 11px; opacity: 0.75; word-break: break-word; }
 .msg { margin-top: 8px; padding: 6px 8px; border-radius: 4px; background: color-mix(in srgb, var(--warn) 14%, var(--card)); }
 .settings { margin: 8px 14px 0; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
 .settings[open] summary { font-weight: 600; color: var(--text); }
@@ -93,3 +90,28 @@ input, select {
 }
 select { margin-top: 3px; }
 .hint { display: block; color: var(--muted); font-size: 12px; }
+fieldset.field { border: 1px solid var(--line); border-radius: 5px; padding: 4px 8px 8px; }
+legend { padding: 0 4px; color: var(--soft); }
+.choice { display: block; margin: 4px 0 0; }
+.choice input { width: auto; margin-right: 4px; }
+.about { margin: 2px 0; padding-left: 18px; color: var(--soft); }
+.settings h5 { margin-top: 10px; }
+a { color: inherit; }
+.tok { cursor: pointer; border-radius: 3px; }
+.tok:hover, .tok.active { background: color-mix(in srgb, var(--accent) 30%, transparent); }
+.dict { margin: 4px 0 8px; }
+.dict-entry {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;
+  padding: 5px 8px; margin: 4px 0; background: var(--card); border: 1px solid var(--line); border-radius: 5px;
+}
+.dict-entry .w { font-size: 16px; }
+.dict-entry .r { color: var(--rt); margin-left: 6px; font-size: 12px; }
+.dict-entry .pos { display: block; color: var(--muted); font-size: 11px; }
+.dict-entry .g { display: block; }
+.dict-entry.have { opacity: .55; }
+.dict-entry button {
+  border: 0; background: var(--ok); color: #fff; border-radius: 4px; padding: 2px 9px;
+  font-weight: 700; cursor: pointer; white-space: nowrap;
+}
+.dict-entry.have button, .dict-entry button:disabled { background: #999; cursor: default; }
+.own-key-btn { margin-top: 6px; }

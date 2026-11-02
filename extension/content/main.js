@@ -6,18 +6,25 @@
   const { PageFinder, Overlay, Status } = globalThis.AnkiManga;
 
   // After the extension is reloaded, the copy that was running in this tab is cut off from it
-  // (its layers stay in the DOM but can't reach the helper). Drop those layers; this copy
-  // re-creates them from the helper's cache.
+  // (its layers stay in the DOM but can't reach the extension). Drop those layers; this copy
+  // re-creates them from the engine's cache.
   document.querySelectorAll(".am-layer, .am-badge").forEach((n) => n.remove());
 
   const RETRY_DELAYS = [2000, 4000, 8000];
   const RETRY_LATER = 15000;
-  const RETRYABLE = new Set(["warming", "helper_unreachable"]);
+  const RETRYABLE = new Set(["models_downloading", "models_loading"]);
+  // engine_error (a failed model download or start): the engine restarts itself on the next request, so try again
+  // a few times with a growing pause, then leave the failed badge until the worker says the engine is ready (am:retry).
+  const ENGINE_ERROR_DELAYS = [5000, 15000, 60000];
+  // Only an image the engine could not read is worth a screenshot (which needs the <all_urls> permission).
+  const UNREADABLE = new Set(["fetch_failed", "bad_image"]);
 
   const results = new Map(); // pageKey -> Promise<am:page response> (cached, so re-shown images reuse it)
   const byImg = new Map(); // img -> {key, handle}
   const byPage = new Map(); // pageId -> handle[]
   const waitingPermission = new Set(); // img elements blocked on image-host permission
+  const engineFailures = new Map(); // img -> engine_error count since the last success
+  const engineFailed = new Set(); // img elements that gave up after engine_error
   let hovered = null; // {pageId, bubbleId}
 
   function send(msg) {
@@ -107,6 +114,7 @@
     if (!(res && res.ok)) results.delete(key);
     if (res && res.ok) {
       waitingPermission.delete(img);
+      engineFailures.delete(img);
       await whenDisplayed(img);
       if (byImg.get(img) && byImg.get(img).key === key) showPage(img, key, res.page);
       return;
@@ -117,12 +125,22 @@
       byImg.delete(img);
       const delay = RETRY_DELAYS[attempt] ?? RETRY_LATER;
       setTimeout(() => processImage(img, attempt + 1), delay);
+    } else if (error === "engine_error") {
+      const failures = engineFailures.get(img) || 0;
+      engineFailures.set(img, failures + 1);
+      if (failures < ENGINE_ERROR_DELAYS.length) {
+        byImg.delete(img);
+        setTimeout(() => processImage(img, attempt + 1), ENGINE_ERROR_DELAYS[failures]);
+      } else {
+        byImg.set(img, { key, handle: null, failed: error });
+        engineFailed.add(img);
+      }
     } else if (error === "no_image_permission") {
       waitingPermission.add(img);
       byImg.delete(img);
     } else {
       byImg.set(img, { key, handle: null, failed: error });
-      if (error !== "not_manga") queueCapture(img);
+      if (UNREADABLE.has(error)) queueCapture(img);
     }
   }
 
@@ -149,18 +167,51 @@
     return true; // lazy placeholder: the background checks the real size after fetching
   }
 
-  const io = new IntersectionObserver(
-    (entries) => {
-      for (const e of entries) {
-        if (e.isIntersecting && candidate(e.target)) processImage(e.target);
-      }
-    },
-    { rootMargin: "150% 0px" },
-  );
+  // Prefetch starts a page well before it scrolls into view; on-demand (slow machines) only
+  // starts pages that are at least half visible.
+  const IO_OPTIONS = {
+    prefetch: { rootMargin: "150% 0px" },
+    "on-demand": { rootMargin: "0px", threshold: [0.1, 0.2, 0.3, 0.4, 0.5] },
+  };
+  const imgs = new Set(); // watched <img> elements, to re-observe when the mode changes
+  let perfMode = "prefetch";
+  let io = makeObserver(perfMode);
+
+  // isIntersecting turns true at one pixel of overlap, so on-demand checks the share itself: half of the page, or (a
+  // tall strip can never be half visible) half of the viewport.
+  function startsHere(e, mode) {
+    if (mode !== "on-demand") return true;
+    return e.intersectionRatio >= 0.5 || e.intersectionRect.height >= window.innerHeight * 0.5;
+  }
+
+  function makeObserver(mode) {
+    return new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting && startsHere(e, mode) && candidate(e.target)) processImage(e.target);
+        }
+      },
+      IO_OPTIONS[mode],
+    );
+  }
+
+  function applyMode(mode) {
+    if (mode === perfMode) return;
+    perfMode = mode;
+    io.disconnect();
+    io = makeObserver(mode);
+    for (const img of imgs) if (img.isConnected) io.observe(img);
+  }
+
+  // The worker decides the mode (it holds the settings, incl. the API key, which a content script must never read)
+  // and pushes a changed mode as am:perf-mode.
+  const MODES = new Set(["prefetch", "on-demand"]);
+  send({ type: "am:perf-mode" }).then((r) => r && MODES.has(r.mode) && applyMode(r.mode));
 
   function watch(img) {
     if (img.__amWatched) return;
     img.__amWatched = true;
+    imgs.add(img);
     io.observe(img);
   }
 
@@ -181,6 +232,7 @@
           setState(img, null);
           byImg.delete(img);
           io.unobserve(img);
+          imgs.delete(img);
           img.__amWatched = false;
         }
         watch(img);
@@ -302,7 +354,15 @@
         h.setText(msg.bubbleId, msg.text);
         showProgress(h);
       }
+    } else if (msg.type === "am:perf-mode") {
+      if (MODES.has(msg.mode)) applyMode(msg.mode);
     } else if (msg.type === "am:retry") {
+      for (const img of [...engineFailed]) {
+        engineFailed.delete(img);
+        engineFailures.delete(img);
+        byImg.delete(img);
+        processImage(img);
+      }
       for (const img of [...waitingPermission]) processImage(img);
       for (const el of [...captureBlocked]) {
         captureBlocked.delete(el);

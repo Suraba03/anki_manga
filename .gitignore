@@ -17,9 +17,18 @@ __pycache__/
 .env
 
 # Build/dev
-helper/.venv/
+dist/
 extension/node_modules/
-.pytest_cache/
 
 # development notes (specs, plans): kept local
 docs/superpowers/
+
+# agent rules: kept local
+CLAUDE.md
+tools/.cache/
+tools/e2e/.cache/
+/reference/
+
+# Free-tier server
+server/node_modules/
+server/.wrangler/

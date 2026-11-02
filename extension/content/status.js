@@ -4,16 +4,18 @@
   const NS = (globalThis.AnkiManga ??= {});
 
   const ERRORS = {
-    helper_unreachable: "helper not running",
     extension_reloaded: "extension reloaded — refresh the page",
     no_image_permission: "allow images in the side panel",
     fetch_failed: "can't load this image",
     capture_failed: "allow screenshots in the side panel",
     bad_image: "can't read this image",
-    bad_token: "not paired — open the side panel",
+    engine_error: "recognition failed — see the side panel",
   };
   const IGNORED = new Set(["not_manga"]);
-  const BUSY_ERRORS = { warming: "helper starting…" };
+  const BUSY_ERRORS = {
+    models_downloading: "downloading models…",
+    models_loading: "loading models…",
+  };
 
   // state: null | {phase: "detecting"} | {phase: "ocr", done, total} | {phase: "error", error}
   function badge(state) {
