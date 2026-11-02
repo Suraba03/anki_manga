@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { SYSTEM_PROMPT, PROMPT_VERSION, buildMessages, parseExplanation } from "../lib/prompt.js";
@@ -183,8 +184,13 @@ test("second call for the same text is served from the cache", async () => {
 
 // ---- free tier ----
 
-test("FREE_URL placeholder is empty; empty freeUrl in free mode is free_unavailable with no fetch", async () => {
-  assert.equal(FREE_URL, "");
+test("FREE_URL points at the deployed Worker, and the manifest grants its host", () => {
+  assert.equal(FREE_URL, "https://anki-manga-free.suraba03.workers.dev/explain");
+  const manifest = JSON.parse(readFileSync(new URL("../manifest.json", import.meta.url), "utf8"));
+  assert.ok(manifest.host_permissions.includes("https://anki-manga-free.suraba03.workers.dev/*"));
+});
+
+test("empty freeUrl in free mode is free_unavailable with no fetch", async () => {
   const f = fakeFetch(() => jsonResponse(200, {}));
   assert.deepEqual(await run("x", free(), f, fakeStore(), ""), { ok: false, error: "free_unavailable" });
   assert.equal(f.calls.length, 0);

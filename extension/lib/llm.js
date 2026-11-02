@@ -1,7 +1,7 @@
 // Explains a clicked bubble: local cache first, then the owner's free-tier server or the user's own provider.
 import { PROMPT_VERSION, ExplainError, buildMessages, parseExplanation } from "./prompt.js";
 
-export const FREE_URL = ""; // the free-tier server endpoint; filled in with Task 13
+export const FREE_URL = "https://anki-manga-free.suraba03.workers.dev/explain"; // the free-tier server (server/, Cloudflare Worker)
 const DEEPSEEK_BASE = "https://api.deepseek.com";
 const DEFAULT_MODEL = "deepseek-flash";
 const FREE_MAX_CHARS = 300;

@@ -122,7 +122,7 @@ Cards are tagged `anki_manga`. You can restyle the card template in Anki (**Tool
 
 Choose in **Settings → Explanations**.
 
-- **Free.** No account and no key. Up to 100 explanations per install per day (the panel shows how many are left today), paid for by the project owner within a monthly budget. When the day's limit or the month's budget runs out, the panel says so and offers to switch to your own key. Identical bubble texts are answered from a shared cache, so they don't count twice. Free mode works in the published build; a build you load from source may not have the server address and will offer your own key instead.
+- **Free.** No account and no key. Up to 100 explanations per install per day (the panel shows how many are left today), paid for by the project owner within a monthly budget. When the day's limit or the month's budget runs out, the panel says so and offers to switch to your own key. Identical bubble texts are answered from a shared cache, so they don't count twice.
 - **Use my own API key.** Pick **DeepSeek** or **Custom (OpenAI-compatible)** (with a base URL; Chrome asks for permission to talk to that host once). Paste your key and, optionally, a model name (the default is `deepseek-flash`). The text of the bubble you click goes straight from your browser to your provider. Your key stays in the extension's storage on your device.
   - DeepSeek: sign up at [platform.deepseek.com](https://platform.deepseek.com/), top up a small balance, then **API keys → Create new API key** (it starts with `sk-`). One explanation is a few hundred tokens, a tiny fraction of a cent; see [DeepSeek pricing](https://api-docs.deepseek.com/quick_start/pricing).
 
@@ -252,7 +252,7 @@ cd server && node --test                  # free-tier Worker tests (no install n
   2. `npx wrangler d1 create anki-manga`, paste the printed id into `wrangler.toml`, then `npx wrangler d1 execute anki-manga --remote --file schema.sql`
   3. `npx wrangler secret put DEEPSEEK_API_KEY` and `npx wrangler secret put IP_SALT`
   4. Check the price and model variables in `wrangler.toml`, then `npm run deploy`
-  5. Put the Worker's URL in `FREE_URL` in `extension/lib/llm.js` and the extension's Store ID in `ALLOWED_ORIGINS`.
+  5. Put the Worker's URL in `FREE_URL` in `extension/lib/llm.js` and in the manifest's `host_permissions`; once the Store ID is known, set `ALLOWED_ORIGINS` to it.
 
   `npm run dev` runs it locally. Deploying is the owner's step.
 - **Store package:** `node tools/package.mjs` writes `dist/manga-mining-<version>.zip` (the `extension/` folder without `test/`, `node_modules/` and `package*.json`). `--out <dir>` changes the folder.
