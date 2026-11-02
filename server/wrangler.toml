@@ -26,8 +26,8 @@ ALLOW_NO_ORIGIN = "0"
 [[d1_databases]]
 binding = "DB"
 database_name = "anki-manga"
-# Placeholder: the owner pastes the id printed by `npx wrangler d1 create anki-manga`. Never commit the real one.
-database_id = "REPLACE_WITH_D1_ID"
+# The owner's D1 database (`npx wrangler d1 create anki-manga`). Not a secret: useless without the Cloudflare account.
+database_id = "a25aee26-42b1-434f-800e-330a1c17b44d"
 
 # Secrets (npx wrangler secret put ...): DEEPSEEK_API_KEY, IP_SALT. Never put them in this file.
 

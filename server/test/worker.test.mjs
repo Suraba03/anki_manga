@@ -262,10 +262,12 @@ test("a 200 from DeepSeek with an unreadable payload is flagged paid; HTTP error
   assert.deepEqual(noContent.usage, usage);
 });
 
-test("wrangler.toml ships deepseek-flash and a placeholder database id", () => {
+test("wrangler.toml ships deepseek-flash and the deployed D1 database id", () => {
   const toml = readFileSync(new URL("../wrangler.toml", import.meta.url), "utf8");
   assert.match(toml, /^LLM_MODEL = "deepseek-flash"$/m);
-  assert.match(toml, /^database_id = "REPLACE_WITH_D1_ID"$/m);
+  // The id is not a secret (useless without the owner's Cloudflare account); it is committed so deploys are reproducible.
+  assert.match(toml, /^database_id = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"$/m);
+  assert.doesNotMatch(toml, /REPLACE_WITH_D1_ID/);
 });
 
 test("callDeepSeek reports finish_reason, for logging a rejected answer", async () => {
