@@ -77,6 +77,7 @@ h5 { margin: 12px 0 4px; font-size: 11px; letter-spacing: .06em; text-transform:
 .card.have { opacity: .55; }
 .card.have button, .card button:disabled { background: #999; cursor: default; }
 .skeleton { color: var(--muted); }
+.msg-detail { margin-top: 4px; font-size: 11px; opacity: 0.75; word-break: break-word; }
 .msg { margin-top: 8px; padding: 6px 8px; border-radius: 4px; background: color-mix(in srgb, var(--warn) 14%, var(--card)); }
 .settings { margin: 8px 14px 0; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
 .settings[open] summary { font-weight: 600; color: var(--text); }

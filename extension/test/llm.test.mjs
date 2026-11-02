@@ -358,3 +358,45 @@ test("in-flight entry is removed after a failure, so a retry fetches again", asy
   await run("d2", own(), f, store);
   assert.equal(f.calls.length, 2);
 });
+
+// ---- diagnostics: onError gets the concrete cause, never the API key ----
+
+const withLog = (text, settings, fetch, opts = {}) => {
+  const log = [];
+  const p = explain(text, { settings, store: fakeStore(), fetch, freeUrl: FREE_URL_TEST, onError: (d) => log.push(d), ...opts });
+  return p.then((r) => ({ r, log }));
+};
+
+test("onError: free HTTP failure reports the status and the server's error code", async () => {
+  const { r, log } = await withLog(TEXT, free(), fakeFetch(() => jsonResponse(502, { error: "upstream_failed" })));
+  assert.deepEqual(r, { ok: false, error: "free_unavailable" });
+  assert.equal(log.length, 1);
+  assert.match(log[0], /free_unavailable/);
+  assert.match(log[0], /HTTP 502/);
+  assert.match(log[0], /upstream_failed/);
+});
+
+test("onError: a thrown fetch reports the network error; a timeout says timeout", async () => {
+  const boom = fakeFetch(() => { throw new TypeError("Failed to fetch"); });
+  const a = await withLog(TEXT, free(), boom);
+  assert.match(a.log[0], /Failed to fetch/);
+  const hang = (url, init) => new Promise((_, rej) => init.signal.addEventListener("abort", () => rej(new DOMException("aborted", "AbortError"))));
+  const b = await withLog(TEXT, own(), hang, { timeoutMs: 20 });
+  assert.deepEqual(b.r, { ok: false, error: "network" });
+  assert.match(b.log[0], /timeout/);
+});
+
+test("onError: own-key HTTP failure carries the provider's message but not the key", async () => {
+  const f = fakeFetch(() => jsonResponse(400, { error: { message: "Model Not Exist" } }));
+  const { r, log } = await withLog(TEXT, own({ apiKey: "sk-secret-123" }), f);
+  assert.deepEqual(r, { ok: false, error: "bad_response" });
+  assert.match(log[0], /HTTP 400/);
+  assert.match(log[0], /Model Not Exist/);
+  assert.doesNotMatch(log[0], /sk-secret-123/);
+});
+
+test("onError: an unparseable success says so", async () => {
+  const { log } = await withLog(TEXT, own(), fakeFetch(() => jsonResponse(200, { choices: [{ message: { content: "not json" } }] })));
+  assert.match(log[0], /bad_response/);
+  assert.match(log[0], /invalid JSON/);
+});

@@ -32,6 +32,14 @@ function addMsg(el, text, action = null) {
   }
 }
 
+// The concrete cause (HTTP status, network error, timeout) in small print under the message, for bug reports.
+function addDetail(el, text) {
+  const line = document.createElement("div");
+  line.className = "msg-detail";
+  line.textContent = `Details: ${text}`;
+  el.querySelector(".msg").append(line);
+}
+
 function clearMsg(el) {
   const box = el.querySelector(".msg");
   box.hidden = true;
@@ -214,12 +222,18 @@ export async function explainSelection(sel) {
   // 2) explanation: local cache, then the free tier or the user's own provider
   tr.textContent = "Explaining…";
   tr.classList.add("skeleton");
-  const r = await explain(ctx.text, { settings: await getSettings(), store: await store(), fetch: (...a) => fetch(...a), freeUrl: FREE_URL });
+  let cause = "";
+  const onError = (d) => {
+    cause = d;
+    console.warn("[anki_manga] explanation failed:", d);
+  };
+  const r = await explain(ctx.text, { settings: await getSettings(), store: await store(), fetch: (...a) => fetch(...a), freeUrl: FREE_URL, onError });
   tr.classList.remove("skeleton");
   if (!r.ok) {
     tr.textContent = "";
     const { text, action } = explainErrorMessage(r.error);
     addMsg(el, text, action);
+    if (cause) addDetail(el, cause);
     const left = freeRemainingAfterError(r.error);
     if (left !== null) chrome.storage.session.set({ freeRemaining: left });
     return;

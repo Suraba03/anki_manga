@@ -18,6 +18,7 @@ export class ExplainError extends Error {
   constructor(kind, detail = "") {
     super(detail ? `${kind}: ${detail}` : kind);
     this.kind = kind;
+    this.detail = detail;
   }
 }
 
