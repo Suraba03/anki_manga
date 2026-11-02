@@ -5,6 +5,7 @@
 //            on 127.0.0.1:47900, loads the first page in a tab and waits for the overlay to show its texts
 //   --probe  platform probe: offscreen document, WebGPU session, cross-origin fetch, AnkiConnect
 //            (the AnkiConnect probe runs only when ANKI_RUNNING=1)
+import { FREE_URL } from "../../extension/lib/llm.js";
 import { spawn, execFileSync } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, existsSync, createReadStream, statSync } from "node:fs";
@@ -157,6 +158,7 @@ function startServer(image) {
 // A stand-in for AnkiConnect (the real one is Anki's add-on): records the notes it is asked to add. It listens on
 // its own port and the panel page is pointed at it, so a running Anki is never touched by the test.
 const FAKE_ANKI_PORT = 8766;
+const FREE_TIER_HOST = new URL(FREE_URL).hostname;
 const REAL_ANKI_PORT = 8765;
 function startFakeAnki() {
   const notes = [];
@@ -196,6 +198,7 @@ async function panelCheck(sw, ref) {
   const panel = await Cdp.open(created.webSocketDebuggerUrl);
   const anki = await startFakeAnki();
   let redirected = 0;
+  let freeTierFaked = 0;
   if (!anki) throw new Error(`port ${FAKE_ANKI_PORT} is busy`);
   try {
     await panel.send("Page.enable");
@@ -218,9 +221,25 @@ async function panelCheck(sw, ref) {
       } catch {
         // an unparseable URL cannot be aimed at Anki; it is not network traffic of ours
       }
-      const reply = /:8765\b/.test(ev.request.url) && !target
-        ? panel.send("Fetch.failRequest", { requestId: ev.requestId, errorReason: "BlockedByClient" })
-        : panel.send("Fetch.continueRequest", { requestId: ev.requestId, ...(target && { url: target.href }) });
+      // The real free-tier server is never called from the smoke (it would spend the owner's quota): it answers 503.
+      const toFreeTier = (() => {
+        try {
+          return new URL(ev.request.url).hostname === FREE_TIER_HOST;
+        } catch {
+          return false;
+        }
+      })();
+      const reply = toFreeTier
+        ? panel.send("Fetch.fulfillRequest", {
+            requestId: ev.requestId,
+            responseCode: 503,
+            responseHeaders: [{ name: "Content-Type", value: "application/json" }],
+            body: Buffer.from(JSON.stringify({ error: "free_unavailable" })).toString("base64"),
+          })
+        : /:8765\b/.test(ev.request.url) && !target
+          ? panel.send("Fetch.failRequest", { requestId: ev.requestId, errorReason: "BlockedByClient" })
+          : panel.send("Fetch.continueRequest", { requestId: ev.requestId, ...(target && { url: target.href }) });
+      if (toFreeTier) freeTierFaked++;
       reply.catch(() => {});
       if (target) redirected++;
     });
@@ -244,7 +263,8 @@ async function panelCheck(sw, ref) {
     console.log(`panel card: deck=${note.deckName} Word=${note.fields.Word} Reading=${note.fields.Reading} picture=${pic?.filename} (${pic?.data.length} base64 chars)`);
     const cardOk = note.deckName === "manga mining" && !!note.fields.Word && /^anki_manga_[0-9a-f]{12}_\d+\.jpg$/.test(pic?.filename) && pic.data.length > 1000;
     console.log(`panel requests redirected from port ${REAL_ANKI_PORT} to the fake: ${redirected}`);
-    return cardOk && redirected > 0 && msg.includes("free explanation service is unavailable");
+    console.log(`panel free-tier requests answered by the fake: ${freeTierFaked}`);
+    return cardOk && redirected > 0 && freeTierFaked > 0 && msg.includes("free explanation service is unavailable");
   } finally {
     anki.server.close();
     panel.close();
