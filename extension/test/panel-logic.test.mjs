@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   explainErrorMessage,
+  waitForBubbleText,
   modelStatusLine,
   freeLeftText,
   ankiErrorMessage,
@@ -139,4 +140,25 @@ test("a free-tier limit answer sets the 'left today' count to 0", () => {
   assert.equal(freeRemainingAfterError("free_monthly_cap"), 0);
   assert.equal(freeRemainingAfterError("free_unavailable"), null);
   assert.equal(freeRemainingAfterError("auth"), null);
+});
+
+test("waitForBubbleText polls while the bubble is still being read, then returns the text", async () => {
+  const replies = [{ ok: false, error: "text_pending" }, { ok: false, error: "text_pending" }, { ok: true, text: "あ" }];
+  let calls = 0;
+  const slept = [];
+  const b = await waitForBubbleText(async () => replies[calls++], { intervalMs: 500, timeoutMs: 10000, sleep: async (ms) => void slept.push(ms) });
+  assert.deepEqual(b, { ok: true, text: "あ" });
+  assert.equal(calls, 3);
+  assert.deepEqual(slept, [500, 500]);
+});
+
+test("waitForBubbleText gives up after the timeout with the pending reply, and stops at other errors", async () => {
+  let t = 0;
+  const pending = await waitForBubbleText(async () => ({ ok: false, error: "text_pending" }), { intervalMs: 1000, timeoutMs: 3000, sleep: async (ms) => void (t += ms), now: () => t });
+  assert.deepEqual(pending, { ok: false, error: "text_pending" });
+  assert.ok(t >= 3000 && t <= 4000);
+  let n = 0;
+  const other = await waitForBubbleText(async () => (n++, { ok: false, error: "unknown_bubble" }), { sleep: async () => {} });
+  assert.deepEqual(other, { ok: false, error: "unknown_bubble" });
+  assert.equal(n, 1);
 });

@@ -176,8 +176,10 @@ test("callDeepSeek sends the same body as the extension's own-key path", async (
     response_format: { type: "json_object" },
     max_tokens: 700,
     stream: false,
+    thinking: { type: "disabled" },
   });
   assert.equal(out.result, RAW);
+  assert.equal(out.finishReason, null);
   assert.deepEqual(out.usage, { prompt_cache_hit_tokens: 1, prompt_cache_miss_tokens: 2, completion_tokens: 3, total_tokens: 6 });
 });
 
@@ -264,4 +266,10 @@ test("wrangler.toml ships deepseek-flash and a placeholder database id", () => {
   const toml = readFileSync(new URL("../wrangler.toml", import.meta.url), "utf8");
   assert.match(toml, /^LLM_MODEL = "deepseek-flash"$/m);
   assert.match(toml, /^database_id = "REPLACE_WITH_D1_ID"$/m);
+});
+
+test("callDeepSeek reports finish_reason, for logging a rejected answer", async () => {
+  const fetch = async () => Response.json({ choices: [{ message: { content: "   " }, finish_reason: "length" }], usage: {} });
+  const out = await callDeepSeek("a", { apiKey: "k", model: "m", fetch });
+  assert.equal(out.finishReason, "length");
 });

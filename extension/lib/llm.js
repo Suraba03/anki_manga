@@ -60,6 +60,8 @@ async function callOwn(text, { settings, fetch, signal }) {
         response_format: { type: "json_object" },
         max_tokens: 700,
         stream: false,
+        // DeepSeek only: deepseek-flash thinks by default, which eats the token budget and cuts or blanks the JSON.
+        ...(llm.provider === "custom" ? {} : { thinking: { type: "disabled" } }),
       }),
     });
   } catch (e) {

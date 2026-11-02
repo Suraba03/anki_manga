@@ -118,6 +118,7 @@ test("own key: success sends bearer, v1 body, DeepSeek URL; stores under explana
     response_format: { type: "json_object" },
     max_tokens: 700,
     stream: false,
+    thinking: { type: "disabled" },
   });
   assert.deepEqual(store.data.get(await store.explanationKey(TEXT)), GOOD);
 });
@@ -399,4 +400,10 @@ test("onError: an unparseable success says so", async () => {
   const { log } = await withLog(TEXT, own(), fakeFetch(() => jsonResponse(200, { choices: [{ message: { content: "not json" } }] })));
   assert.match(log[0], /bad_response/);
   assert.match(log[0], /invalid JSON/);
+});
+
+test("own key: a custom provider gets no DeepSeek-only thinking field", async () => {
+  const f = fakeFetch(() => jsonResponse(200, chatPayload()));
+  await run("x", own({ provider: "custom", baseUrl: "https://llm.example.test/v1", model: "m" }), f);
+  assert.equal("thinking" in f.calls[0].body, false);
 });

@@ -114,7 +114,8 @@ export async function handleExplain(body, { db, callLlm, now, ipHash, origin, co
   try {
     result = parseExplanation(out?.result);
   } catch (e) {
-    console.error("free tier: LLM answer rejected:", describeError(e));
+    const len = typeof out?.result === "string" ? out.result.trim().length : -1;
+    console.error("free tier: LLM answer rejected:", describeError(e), `finish_reason=${out?.finishReason ?? "?"} content_chars=${len}`);
     await charge(out?.usage); // paid, but no quota use and nothing cached
     return err(502, "free_unavailable");
   }

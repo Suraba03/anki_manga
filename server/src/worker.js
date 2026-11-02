@@ -24,6 +24,8 @@ export async function callDeepSeek(text, { apiKey, model = DEFAULT_MODEL, fetch:
         response_format: { type: "json_object" },
         max_tokens: 700,
         stream: false,
+        // deepseek-flash thinks by default; its reasoning eats the token budget and the JSON comes back cut or blank.
+        thinking: { type: "disabled" },
       }),
     });
     if (resp.status !== 200) throw Object.assign(new Error("DeepSeek HTTP error"), { status: resp.status });
@@ -36,7 +38,7 @@ export async function callDeepSeek(text, { apiKey, model = DEFAULT_MODEL, fetch:
     }
     const content = data?.choices?.[0]?.message?.content;
     if (typeof content !== "string") throw Object.assign(new Error("DeepSeek: no content"), { paid: true, usage: data?.usage });
-    return { result: content, usage: data.usage };
+    return { result: content, usage: data.usage, finishReason: data.choices[0].finish_reason ?? null };
   } finally {
     clearTimeout(timer);
   }

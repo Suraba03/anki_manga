@@ -117,3 +117,14 @@ export const shouldAskPermission = ({ denied, userAction }) => !denied || !!user
 
 // A limit answer from the free tier means nothing is left (null: not a limit answer).
 export const freeRemainingAfterError = (code) => (code === "free_daily_limit" || code === "free_monthly_cap" ? 0 : null);
+
+// A bubble clicked before the engine read it answers text_pending: ask again until it has text (or another answer),
+// up to timeoutMs. The click already moved the bubble to the front of the engine's queue.
+export async function waitForBubbleText(fetchBubble, { intervalMs = 700, timeoutMs = 60000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = Date.now } = {}) {
+  const end = now() + timeoutMs;
+  for (;;) {
+    const b = await fetchBubble();
+    if (b?.ok || b?.error !== "text_pending" || now() >= end) return b;
+    await sleep(intervalMs);
+  }
+}

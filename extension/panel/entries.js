@@ -5,7 +5,7 @@ import { getSettings } from "../lib/settings.js";
 import { openStore } from "../engine/store.js";
 import { rubyHtml } from "../lib/text.js";
 import { cardFields } from "../lib/cards.js";
-import { explainErrorMessage, ankiErrorMessage, pictureFilename, freeRemainingAfterError, DICT_UNAVAILABLE, NO_DECK } from "./logic.js";
+import { explainErrorMessage, ankiErrorMessage, pictureFilename, freeRemainingAfterError, waitForBubbleText, DICT_UNAVAILABLE, NO_DECK } from "./logic.js";
 import { engine } from "./engine.js";
 import { ankiForCards, knownWords } from "./anki.js";
 import { currentDeck, openOwnKey } from "./settings.js";
@@ -199,7 +199,8 @@ export async function explainSelection(sel) {
   el.querySelector(".explain").hidden = true;
 
   // 1) furigana: local and instant
-  const b = await engine({ type: "eng:bubble", pageId: sel.pageId, bubbleId: sel.bubbleId });
+  // A bubble clicked before it was read: wait here for its text instead of asking for a second click.
+  const b = await waitForBubbleText(() => engine({ type: "eng:bubble", pageId: sel.pageId, bubbleId: sel.bubbleId }));
   jp.classList.remove("skeleton");
   if (!b.ok || !b.text) {
     jp.textContent = "";
