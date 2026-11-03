@@ -5,7 +5,7 @@ import { getSettings } from "../lib/settings.js";
 import { openStore } from "../engine/store.js";
 import { rubyHtml } from "../lib/text.js";
 import { cardFields } from "../lib/cards.js";
-import { explainErrorMessage, ankiErrorMessage, pictureFilename, freeRemainingAfterError, waitForBubbleText, DICT_UNAVAILABLE, NO_DECK } from "./logic.js";
+import { explainErrorMessage, ankiErrorMessage, pictureFilename, freeRemainingAfterError, waitForBubbleText, cardDoneState, DICT_UNAVAILABLE, NO_DECK } from "./logic.js";
 import { engine } from "./engine.js";
 import { ankiForCards, knownWords } from "./anki.js";
 import { currentDeck, openOwnKey } from "./settings.js";
@@ -47,8 +47,9 @@ function clearMsg(el) {
 }
 
 // --- cards ------------------------------------------------------------------------------
-function markHave(row, btn, label) {
-  row.classList.add("have");
+function markDone(row, btn, outcome) {
+  const { label, cls } = cardDoneState(outcome);
+  row.classList.add(cls);
   btn.textContent = label;
   btn.disabled = true;
   btn.dataset.done = "1";
@@ -57,7 +58,7 @@ function markHave(row, btn, label) {
 // Greys out a row whose word the deck already has (once the deck's known words have arrived).
 function greyIfKnown(ctx, row, btn, card) {
   ctx.knownP.then((known) => {
-    if (known && !btn.dataset.done && known.isKnown(card.word, card.reading)) markHave(row, btn, "✓ in deck");
+    if (known && !btn.dataset.done && known.isKnown(card.word, card.reading)) markDone(row, btn, "in_deck");
   });
 }
 
@@ -91,9 +92,9 @@ function addButton(ctx, row, card) {
     clearMsg(ctx.el);
     try {
       await mine(ctx, card);
-      markHave(row, btn, "✓ added");
+      markDone(row, btn, "added");
     } catch (e) {
-      if (e.kind === "duplicate") return markHave(row, btn, "✓ in deck");
+      if (e.kind === "duplicate") return markDone(row, btn, "in_deck");
       btn.disabled = false;
       btn.textContent = "+";
       addMsg(ctx.el, e.shown || ankiErrorMessage(e.kind || "anki_error", e.kind ? e.message : ""));
