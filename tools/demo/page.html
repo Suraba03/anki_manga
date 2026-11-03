@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Demo manga page</title>
+<style>
+  html, body { margin: 0; background: #fff; }
+  #page { position: relative; width: 880px; height: 1250px; background: #fff; overflow: hidden; }
+  .panel { position: absolute; border: 4px solid #000; box-sizing: border-box; background: #fff; overflow: hidden; }
+  .panel svg { display: block; width: 100%; height: 100%; }
+  #bubbles { position: absolute; left: 0; top: 0; width: 880px; height: 1250px; }
+  .say { position: absolute; margin: 0; color: #000; writing-mode: vertical-rl; text-orientation: mixed;
+    font-family: "Hiragino Mincho ProN", "Hiragino Sans", serif; font-weight: 600; white-space: nowrap; text-align: start; }
+</style>
+</head>
+<body>
+<div id="page"></div>
+<script>
+// ---------- tiny helpers ----------
+let seed = 7;
+const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+const S = "#000";
+
+const DEFS = `<defs>
+  <pattern id="hatch" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="7" stroke="#000" stroke-width="1.3"/></pattern>
+  <pattern id="hatchW" width="11" height="11" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="11" stroke="#000" stroke-width="1.1"/></pattern>
+  <pattern id="dots" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(30)"><circle cx="4" cy="4" r="1.5" fill="#000"/></pattern>
+  <pattern id="dotsL" width="10" height="10" patternUnits="userSpaceOnUse" patternTransform="rotate(30)"><circle cx="5" cy="5" r="1.1" fill="#000"/></pattern>
+  <pattern id="cross" width="7" height="7" patternUnits="userSpaceOnUse"><path d="M0 0L7 7M7 0L0 7" stroke="#000" stroke-width="1"/></pattern>
+</defs>`;
+
+// ---------- characters (drawn around 0,0 = middle of the face; face is ~90 wide) ----------
+function girlHead(expr = "smile", opt = {}) {
+  const hairBack = `<path d="M-58,-6 C-64,-76 64,-76 58,-6 L66,78 C52,92 38,84 36,62 L-36,62 C-38,84 -52,92 -66,78 Z" fill="#000"/>`;
+  const face = `<path d="M-43,-14 C-43,38 -24,53 0,53 C24,53 43,38 43,-14 C43,-44 -43,-44 -43,-14Z" fill="#fff" stroke="#000" stroke-width="3"/>`;
+  const bangs = `<path d="M-52,-6 C-58,-66 58,-66 52,-6 C48,-18 44,-26 38,-31 L32,-14 L20,-37 L9,-13 L-6,-38 L-14,-12 L-29,-35 L-35,-12 L-45,-24 Z" fill="#000"/>
+    <path d="M-32,-48 Q-8,-60 20,-52" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round"/>`;
+  const eyeY = 14;
+  let eyes;
+  if (expr === "happy") eyes = [-17, 17].map((x) => `<path d="M${x - 9},${eyeY + 3} Q${x},${eyeY - 12} ${x + 9},${eyeY + 3}" stroke="#000" stroke-width="3.4" fill="none" stroke-linecap="round"/>`).join("");
+  else if (expr === "pout") eyes = [-17, 17].map((x) => `<path d="M${x - 9},${eyeY + 2} L${x + 9},${eyeY + 2}" stroke="#000" stroke-width="3.4" stroke-linecap="round"/><path d="M${x - 9},${eyeY + 2} Q${x},${eyeY + 11} ${x + 9},${eyeY + 2}" fill="#000"/>`).join("");
+  else eyes = [-17, 17].map((x) => `<ellipse cx="${x}" cy="${eyeY}" rx="6.8" ry="10" fill="#000"/><circle cx="${x - 2}" cy="${eyeY - 4}" r="2.6" fill="#fff"/><circle cx="${x + 2}" cy="${eyeY + 4}" r="1.2" fill="#fff"/><path d="M${x - 9},${eyeY - 8} L${x - 12},${eyeY - 11}" stroke="#000" stroke-width="2"/>`).join("");
+  const brows = expr === "pout"
+    ? `<path d="M-28,-2 L-10,3 M28,-2 L10,3" stroke="#000" stroke-width="3" stroke-linecap="round"/>`
+    : `<path d="M-27,0 Q-17,-6 -8,-1 M27,0 Q17,-6 8,-1" stroke="#000" stroke-width="2.4" fill="none" stroke-linecap="round"/>`;
+  const mouth = {
+    smile: `<path d="M-8,34 Q0,43 8,34" stroke="#000" stroke-width="2.6" fill="none" stroke-linecap="round"/>`,
+    open: `<path d="M-9,31 Q0,52 9,31 Z" fill="#000"/><path d="M-4,41 Q0,37 4,41 Q0,45 -4,41Z" fill="#fff"/>`,
+    happy: `<path d="M-11,30 Q0,54 11,30 Z" fill="#000"/><path d="M-5,43 Q0,38 5,43 Q0,47 -5,43Z" fill="#fff"/>`,
+    pout: `<path d="M-8,40 Q-4,32 0,36 Q4,32 8,40" stroke="#000" stroke-width="2.6" fill="none" stroke-linecap="round"/>`,
+  }[expr] || "";
+  const blush = `<g stroke="#000" stroke-width="1.6" stroke-linecap="round"><path d="M-36,28 l5,-6 M-30,29 l5,-6 M-24,30 l5,-6"/><path d="M36,28 l-5,-6 M30,29 l-5,-6 M24,30 l-5,-6"/></g>`;
+  const nose = `<path d="M0,25 l2,3" stroke="#000" stroke-width="2" stroke-linecap="round"/>`;
+  const ribbon = `<g stroke="#000" stroke-width="2.6" stroke-linejoin="round"><path d="M44,-38 L72,-58 L74,-22 Z" fill="#fff"/><path d="M44,-38 L30,-62 L16,-44 Z" fill="#fff"/><circle cx="46" cy="-38" r="6" fill="#fff"/></g>`;
+  const body = opt.body === false ? "" : `<g>
+      <path d="M-20,46 L-20,62 C-72,70 -92,104 -98,190 L98,190 C92,104 72,70 20,62 L20,46Z" fill="#fff" stroke="#000" stroke-width="3"/>
+      <path d="M-20,62 L0,92 L20,62 Z" fill="#000"/>
+      <path d="M-98,190 C-92,104 -72,70 -20,62 L-30,190Z" fill="url(#hatchW)"/>
+      <path d="M-34,66 C-60,76 -70,100 -74,130" stroke="#000" stroke-width="2" fill="none"/></g>`;
+  return `<g>${hairBack}${body}${face}${blush}${eyes}${brows}${nose}${mouth}${bangs}${ribbon}</g>`;
+}
+
+function momHead(expr = "stern", opt = {}) {
+  const hairBack = `<circle cx="0" cy="-70" r="22" fill="#000"/><path d="M-56,-4 C-62,-72 62,-72 56,-4 L52,48 C34,40 -34,40 -52,48 Z" fill="#000"/>`;
+  const face = `<path d="M-40,-14 C-40,34 -22,56 0,56 C22,56 40,34 40,-14 C40,-44 -40,-44 -40,-14Z" fill="#fff" stroke="#000" stroke-width="3"/>`;
+  const bangs = `<path d="M-50,-4 C-56,-62 56,-62 50,-4 C46,-24 30,-34 6,-40 C-14,-34 -36,-26 -40,-4 Z" fill="#000"/>
+    <path d="M6,-40 C20,-30 36,-24 40,-6" stroke="#000" stroke-width="2.6" fill="none"/>
+    <path d="M-30,-50 Q-8,-62 18,-54" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round"/>
+    <circle cx="0" cy="-70" r="22" fill="none"/><path d="M-12,-82 Q0,-92 12,-82" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round"/>`;
+  const eyeY = 12;
+  let eyes, brows, mouth;
+  if (expr === "gentle") {
+    eyes = [-16, 16].map((x) => `<path d="M${x - 9},${eyeY} Q${x},${eyeY + 9} ${x + 9},${eyeY}" stroke="#000" stroke-width="3.2" fill="none" stroke-linecap="round"/>`).join("");
+    brows = `<path d="M-27,-1 Q-16,-7 -7,-2 M27,-1 Q16,-7 7,-2" stroke="#000" stroke-width="2.4" fill="none" stroke-linecap="round"/>`;
+    mouth = `<path d="M-9,34 Q0,44 9,34" stroke="#000" stroke-width="2.6" fill="none" stroke-linecap="round"/>`;
+  } else {
+    eyes = [-16, 16].map((x) => `<path d="M${x - 10},${eyeY - 6} L${x + 10},${eyeY - 6}" stroke="#000" stroke-width="3" stroke-linecap="round"/><ellipse cx="${x}" cy="${eyeY + 2}" rx="6" ry="7.5" fill="#000"/><circle cx="${x - 2}" cy="${eyeY - 1}" r="2.2" fill="#fff"/>`).join("");
+    brows = `<path d="M-30,-6 L-8,-12 M30,-6 L8,-12" stroke="#000" stroke-width="3.2" stroke-linecap="round"/>`;
+    mouth = `<path d="M-8,36 L8,36" stroke="#000" stroke-width="2.8" stroke-linecap="round"/>`;
+  }
+  const nose = `<path d="M0,24 l2,3" stroke="#000" stroke-width="2" stroke-linecap="round"/>`;
+  const lines = expr === "gentle" ? "" : `<path d="M-34,-18 l-6,-6 M-30,-26 l-6,-6" stroke="#000" stroke-width="0"/>`;
+  const body = opt.body === false ? "" : `<g>
+      <path d="M-18,48 L-18,64 C-76,72 -96,106 -102,196 L102,196 C96,106 76,72 18,64 L18,48Z" fill="#fff" stroke="#000" stroke-width="3"/>
+      <path d="M-18,64 L0,84 L18,64" stroke="#000" stroke-width="2.6" fill="none"/>
+      <path d="M-44,196 L-38,110 C-20,100 20,100 38,110 L44,196Z" fill="url(#dots)" stroke="#000" stroke-width="2.6"/>
+      <path d="M-18,104 L-18,86 M18,104 L18,86" stroke="#000" stroke-width="2.6"/>
+      <rect x="-22" y="146" width="44" height="26" fill="#fff" stroke="#000" stroke-width="2.4"/>
+      <path d="M-102,196 C-96,106 -76,72 -18,64 L-30,196Z" fill="url(#hatchW)"/></g>`;
+  return `<g>${hairBack}${body}${face}${eyes}${brows}${nose}${mouth}${lines}${bangs}</g>`;
+}
+
+// small full figures for the beach panel (feet at y=0)
+function smallFigure(kind, pose = "walk") {
+  const dress = kind === "girl"
+    ? `<path d="M-14,-62 L14,-62 L24,-22 L-24,-22 Z" fill="#fff" stroke="#000" stroke-width="2.6" stroke-linejoin="round"/><path d="M-24,-22 L-14,-62 L-2,-62 L-6,-22Z" fill="url(#hatch)"/>`
+    : `<path d="M-15,-66 L15,-66 L20,-18 L-20,-18 Z" fill="#fff" stroke="#000" stroke-width="2.6" stroke-linejoin="round"/><path d="M-12,-46 L12,-46 L16,-20 L-16,-20Z" fill="url(#dots)" stroke="#000" stroke-width="1.8"/>`;
+  const legs = pose === "jump"
+    ? `<path d="M-8,-22 L-16,-2 M8,-22 L16,-4" stroke="#000" stroke-width="3.4" stroke-linecap="round"/>`
+    : `<path d="M-7,-18 L-10,0 M7,-18 L12,-1" stroke="#000" stroke-width="3.4" stroke-linecap="round"/><path d="M-10,0 l-8,0 M12,-1 l8,0" stroke="#000" stroke-width="3.4" stroke-linecap="round"/>`;
+  const arms = pose === "jump"
+    ? `<path d="M-13,-58 L-34,-92 M13,-58 L34,-92" stroke="#000" stroke-width="3.4" stroke-linecap="round"/>`
+    : `<path d="M-13,-58 L-20,-36 M13,-58 L19,-36" stroke="#000" stroke-width="3.4" stroke-linecap="round"/>`;
+  const head = kind === "girl" ? `<g transform="translate(0,-84) scale(0.36)">${girlHead(pose === "jump" ? "happy" : "smile", { body: false })}</g>` : `<g transform="translate(0,-90) scale(0.34)">${momHead("gentle", { body: false })}</g>`;
+  return `<g>${legs}${arms}${dress}${head}</g>`;
+}
+
+// ---------- panels ----------
+const P = [];
+
+// 1: window with rain, the girl seen from behind
+P.push({ x: 30, y: 30, w: 820, h: 280, svg: (w, h) => {
+  let rain = "", drops = "", streak = "";
+  seed = 11;
+  for (let i = 0; i < 38; i++) { const x = 60 + rnd() * 380, y = 56 + rnd() * 180, r = 3 + rnd() * 4; drops += `<g><path d="M${x},${y - r * 2} Q${x + r},${y} ${x},${y + r} Q${x - r},${y} ${x},${y - r * 2}Z" fill="#fff" stroke="#000" stroke-width="1.6"/></g>`; }
+  for (let i = 0; i < 10; i++) { const x = 70 + rnd() * 360, y = 60 + rnd() * 100, l = 24 + rnd() * 50; streak += `<path d="M${x},${y} q3,${l / 2} 0,${l}" stroke="#000" stroke-width="1.4" fill="none" stroke-linecap="round"/>`; }
+  for (let i = 0; i < 26; i++) { const x = 40 + rnd() * 420, y = 30 + rnd() * 100; rain += `<path d="M${x},${y} l-5,16" stroke="#000" stroke-width="1.3" stroke-linecap="round" opacity="0.7"/>`; }
+  return `<svg viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">${DEFS}
+    <rect width="${w}" height="${h}" fill="#fff"/>
+    <rect width="${w}" height="${h}" fill="url(#dotsL)"/>
+    <!-- wall panelling -->
+    <path d="M0,${h - 40} L${w},${h - 40}" stroke="#000" stroke-width="2"/>
+    <rect x="0" y="${h - 40}" width="${w}" height="40" fill="url(#hatch)"/>
+    <!-- window frame -->
+    <rect x="40" y="26" width="440" height="${h - 74}" fill="#000"/>
+    <rect x="52" y="38" width="416" height="${h - 98}" fill="#fff"/>
+    <!-- sky outside: clearing clouds and the sun -->
+    <clipPath id="glass"><rect x="52" y="38" width="416" height="${h - 98}"/></clipPath>
+    <g clip-path="url(#glass)">
+      <rect x="52" y="38" width="416" height="${h - 98}" fill="url(#dotsL)"/>
+      <circle cx="390" cy="86" r="34" fill="#fff" stroke="#000" stroke-width="3"/>
+      <g stroke="#000" stroke-width="3" stroke-linecap="round">${Array.from({ length: 14 }, (_, i) => { const a = (i / 14) * Math.PI * 2; return `<path d="M${390 + Math.cos(a) * 46},${86 + Math.sin(a) * 46} L${390 + Math.cos(a) * 62},${86 + Math.sin(a) * 62}"/>`; }).join("")}</g>
+      <path d="M52,150 C70,118 110,112 132,134 C146,112 190,112 204,140 C240,124 270,146 262,170 L52,170Z" fill="#fff" stroke="#000" stroke-width="3"/>
+      <path d="M120,158 C150,150 190,152 240,160" stroke="#000" stroke-width="2" fill="none"/>
+      <path d="M52,200 C84,176 130,180 150,198 C190,176 240,184 252,210 L52,214Z" fill="url(#hatch)" stroke="#000" stroke-width="3"/>
+      <path d="M52,${h - 98 + 38} L468,${h - 98 + 38}" stroke="#000" stroke-width="3"/>
+      <rect x="52" y="${h - 100}" width="416" height="40" fill="url(#hatchW)"/>
+      ${rain}
+    </g>
+    <!-- glass: drops and streaks -->
+    ${streak}${drops}
+    <!-- mullions -->
+    <rect x="254" y="38" width="12" height="${h - 98}" fill="#000"/>
+    <rect x="52" y="${(h - 98) / 2 + 26}" width="416" height="10" fill="#000"/>
+    <!-- sill and plant -->
+    <rect x="26" y="${h - 56}" width="468" height="16" fill="#fff" stroke="#000" stroke-width="3"/>
+    <g transform="translate(430,${h - 56})"><path d="M-22,0 L-16,-34 L16,-34 L22,0Z" fill="#fff" stroke="#000" stroke-width="3"/><path d="M-19,-12 L19,-12" stroke="#000" stroke-width="2"/>
+      <path d="M0,-34 C-4,-60 -22,-70 -34,-66 C-30,-52 -14,-44 0,-40 M0,-34 C4,-66 20,-78 34,-72 C32,-56 16,-46 0,-40 M0,-36 C0,-70 -2,-84 0,-94" fill="#000" stroke="#000" stroke-width="2.4"/></g>
+    <!-- the girl, from behind -->
+    <g transform="translate(738,${h - 130})">
+      <path d="M-40,40 C-96,52 -118,84 -124,140 L124,140 C118,84 96,52 40,40Z" fill="#fff" stroke="#000" stroke-width="3"/>
+      <path d="M-124,140 C-118,84 -96,52 -40,40 L-52,140Z" fill="url(#hatchW)"/>
+      <path d="M-12,24 L-12,48 L12,48 L12,24Z" fill="#fff" stroke="#000" stroke-width="3"/>
+      <path d="M-62,-6 C-68,-86 68,-86 62,-6 L64,52 C42,66 -42,66 -64,52Z" fill="#000"/>
+      <path d="M-38,-50 Q-6,-74 32,-58" stroke="#fff" stroke-width="3.4" fill="none" stroke-linecap="round"/>
+      <path d="M-34,-22 Q-4,-38 30,-28" stroke="#fff" stroke-width="2.4" fill="none" stroke-linecap="round"/>
+      <path d="M-30,0 Q-26,26 -34,48 M-8,4 Q-6,30 -10,56 M18,4 Q20,30 14,58 M40,-2 Q44,24 38,50" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" opacity="0.85"/>
+      <g stroke="#000" stroke-width="2.6" stroke-linejoin="round"><path d="M-46,-34 L-76,-56 L-78,-18 Z" fill="#fff"/><path d="M-46,-34 L-30,-60 L-16,-40 Z" fill="#fff"/><circle cx="-48" cy="-34" r="6" fill="#fff"/></g>
+    </g>
+  </svg>`;
+} });
+
+// 2: the girl, close-up, with the sea behind her
+P.push({ x: 360, y: 328, w: 490, h: 380, svg: (w, h) => {
+  let waves = "";
+  for (let r = 0; r < 5; r++) { const y = 150 + r * 28; let d = `M0,${y}`; for (let x = 0; x < w; x += 40) d += ` q10,-10 20,0 t20,0`; waves += `<path d="${d}" stroke="#000" stroke-width="2" fill="none"/>`; }
+  let rays = ""; for (let i = 0; i < 36; i++) { const a = (i / 36) * Math.PI * 2, r1 = 130, r2 = 480; rays += `<path d="M${300 + Math.cos(a) * r1},${200 + Math.sin(a) * r1} L${300 + Math.cos(a + 0.03) * r2},${200 + Math.sin(a + 0.03) * r2}" stroke="#000" stroke-width="1.6"/>`; }
+  return `<svg viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">${DEFS}
+    <rect width="${w}" height="${h}" fill="#fff"/>
+    <rect x="0" y="0" width="${w}" height="140" fill="url(#dotsL)"/>
+    <rect x="0" y="146" width="${w}" height="${h}" fill="url(#hatchW)"/>
+    <path d="M0,146 L${w},146" stroke="#000" stroke-width="3"/>
+    ${waves}
+    ${rays}
+        <g transform="translate(318,226) scale(2.0)">${girlHead("smile")}</g>
+    <g transform="translate(396,66)" stroke="#000" stroke-width="3" stroke-linecap="round"><path d="M0,0 q10,-14 20,0 q10,-14 20,0" fill="none"/></g>
+  </svg>`;
+} });
+
+// 3: the mother
+P.push({ x: 30, y: 328, w: 312, h: 380, svg: (w, h) => {
+  return `<svg viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">${DEFS}
+    <rect width="${w}" height="${h}" fill="#fff"/>
+    <rect width="${w}" height="${h}" fill="url(#dotsL)"/>
+    <g stroke="#000" stroke-width="2" opacity="0.9">${Array.from({ length: 16 }, (_, i) => `<path d="M${i * 22},0 L${i * 22 - 90},${h}"/>`).join("")}</g>
+    <g transform="translate(104,290) scale(1.12)">${momHead("stern")}</g>
+  </svg>`;
+} });
+
+// 4: she complains; mum gives in
+P.push({ x: 30, y: 726, w: 820, h: 250, svg: (w, h) => {
+  return `<svg viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">${DEFS}
+    <rect width="${w}" height="${h}" fill="#fff"/>
+    <rect width="${w}" height="${h}" fill="url(#dotsL)"/>
+    <!-- mum in the middle, the girl on the right (reading order is right to left); the table hides their shoulders -->
+    <g transform="translate(398,146) scale(0.98)">${momHead("gentle", { body: false })}</g>
+    <g transform="translate(736,150) scale(0.98)">${girlHead("pout", { body: false })}</g>
+    <rect x="0" y="${h - 46}" width="${w}" height="46" fill="#fff" stroke="#000" stroke-width="3"/>
+    <rect x="0" y="${h - 46}" width="${w}" height="46" fill="url(#hatch)"/>
+    <g transform="translate(80,${h - 48})"><path d="M0,0 L-6,-28 L40,-28 L34,0Z" fill="#fff" stroke="#000" stroke-width="2.6"/><path d="M40,-22 q16,2 0,16" fill="none" stroke="#000" stroke-width="2.6"/><path d="M8,-36 q-6,-8 0,-16 M22,-36 q-6,-8 0,-16" stroke="#000" stroke-width="2" fill="none" stroke-linecap="round"/></g>
+    <!-- sweat drop and gloom lines -->
+    <g stroke="#000" stroke-width="2.4" stroke-linecap="round" fill="none"><path d="M790,56 q-8,12 0,18 q8,-6 0,-18z" fill="#fff"/><path d="M682,40 l8,12 M672,60 l14,6 M668,82 l16,0"/></g>
+  </svg>`;
+} });
+
+// 5: the beach
+P.push({ x: 30, y: 994, w: 820, h: 226, svg: (w, h) => {
+  let waves = "";
+  for (let r = 0; r < 3; r++) { const y = 88 + r * 16; let d = `M0,${y}`; for (let x = 0; x < w; x += 60) d += ` q15,-9 30,0 t30,0`; waves += `<path d="${d}" stroke="#000" stroke-width="2" fill="none"/>`; }
+  return `<svg viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">${DEFS}
+    <rect width="${w}" height="${h}" fill="#fff"/>
+    <rect width="${w}" height="70" fill="url(#dotsL)"/>
+    <rect y="72" width="${w}" height="52" fill="url(#hatchW)"/>
+    <path d="M0,72 L${w},72" stroke="#000" stroke-width="3"/>
+    ${waves}
+    <!-- shore -->
+    <path d="M0,142 C160,122 360,150 540,130 C660,116 760,128 ${w},120 L${w},${h} L0,${h}Z" fill="#fff" stroke="#000" stroke-width="3"/>
+    <path d="M0,142 C160,122 360,150 540,130 C660,116 760,128 ${w},120 L${w},130 C760,138 660,126 540,142 C360,162 160,134 0,154Z" fill="url(#hatch)"/>
+    <g fill="#000"><circle cx="90" cy="206" r="3"/><circle cx="260" cy="214" r="2.4"/><circle cx="470" cy="204" r="3"/><circle cx="620" cy="218" r="2.4"/><circle cx="760" cy="210" r="3"/><circle cx="360" cy="190" r="2"/></g>
+    <!-- gull -->
+    <g stroke="#000" stroke-width="3" stroke-linecap="round" fill="none"><path d="M300,24 q10,-12 20,0 q10,-12 20,0"/><path d="M360,46 q7,-9 14,0 q7,-9 14,0"/></g>
+    <!-- shell -->
+    <g transform="translate(440,212)"><path d="M-12,0 Q0,-18 12,0Z" fill="#fff" stroke="#000" stroke-width="2.4"/><path d="M0,0 L0,-12 M-6,0 L-5,-10 M6,0 L5,-10" stroke="#000" stroke-width="1.4"/></g>
+    <!-- walking: mum behind, the girl jumping ahead -->
+    <g transform="translate(560,204) scale(1.38)">${smallFigure("girl", "jump")}</g>
+    <g transform="translate(670,206) scale(1.5)">${smallFigure("mom", "walk")}</g>
+    <g stroke="#000" stroke-width="2.6" stroke-linecap="round" fill="none"><path d="M510,70 l-12,-6 M514,84 l-14,0 M520,98 l-12,6"/></g>
+  </svg>`;
+} });
+
+// ---------- speech bubbles ----------
+const FS = 24;      // font size
+const COL = 1.42;   // column pitch (em)
+// cx, cy: centre of the ellipse (page coordinates); lines: columns, right to left; tail: tip (page coordinates)
+const B = [
+  { cx: 548, cy: 166, lines: ["昨日はずっ", "と雨だった", "のに、今日は", "晴れてるね。"], tail: [706, 196], pad: 12 },
+  { cx: 520, cy: 452, lines: ["せっかくだから、", "海まで歩いて", "みない？"], tail: [585, 552], pad: 12 },
+  { cx: 236, cy: 452, lines: ["宿題を終わ", "らせてから", "にしなさい！"], tail: [140, 560], pad: 12 },
+  { cx: 575, cy: 846, lines: ["えー、そんな", "の後でいい", "じゃん…"], tail: [690, 862], pad: 12 },
+  { cx: 220, cy: 846, lines: ["仕方ない", "なあ。少し", "だけだよ。"], tail: [350, 868], pad: 12 },
+  { cx: 390, cy: 1086, lines: ["やった！", "ありがとう、", "お母さん！"], tail: [520, 1150], pad: 12 },
+];
+
+function bubbleSvg(b) {
+  const maxLen = Math.max(...b.lines.map((l) => [...l].length));
+  const w = b.lines.length * FS * COL;
+  const h = maxLen * FS;
+  b.w = w; b.h = h;
+  const rx = (w / 2) * 1.34 + b.pad, ry = (h / 2) * 1.3 + b.pad;
+  b.rx = rx; b.ry = ry;
+  const [tx, ty] = b.tail;
+  const ang = Math.atan2((ty - b.cy) / ry, (tx - b.cx) / rx);
+  const pt = (a, k = 1) => [b.cx + Math.cos(a) * rx * k, b.cy + Math.sin(a) * ry * k];
+  const [x1, y1] = pt(ang - 0.2, 0.96), [x2, y2] = pt(ang + 0.2, 0.96);
+  // slightly curved tail
+  const shape = `<ellipse cx="${b.cx}" cy="${b.cy}" rx="${rx}" ry="${ry}"/><path d="M${x1},${y1} Q${(x1 + tx) / 2 + 2},${(y1 + ty) / 2 - 2} ${tx},${ty} Q${(x2 + tx) / 2 - 2},${(y2 + ty) / 2 + 2} ${x2},${y2}Z"/>`;
+  return `<g stroke="#000" stroke-width="7" stroke-linejoin="round" fill="#000">${shape}</g><g fill="#fff">${shape}</g>`;
+}
+
+const page = document.getElementById("page");
+let html = "";
+for (const p of P) html += `<div class="panel" style="left:${p.x}px;top:${p.y}px;width:${p.w}px;height:${p.h}px">${p.svg(p.w, p.h)}</div>`;
+let bsvg = "", btxt = "";
+for (const b of B) {
+  bsvg += bubbleSvg(b);
+  const cols = b.lines.map((l) => `<span>${l}</span>`).join("<br>");
+  btxt += `<div class="say" style="left:${b.cx - b.w / 2}px;top:${b.cy - b.h / 2}px;width:${b.w}px;height:${b.h}px;font-size:${FS}px;line-height:${COL}">${cols}</div>`;
+}
+page.innerHTML = html + `<svg id="bubbles" viewBox="0 0 880 1250" xmlns="http://www.w3.org/2000/svg">${bsvg}</svg>` + btxt;
+window.__bubbles = B.map((b) => ({ cx: b.cx, cy: b.cy, rx: b.rx, ry: b.ry, text: b.lines.join("") }));
+</script>
+</body>
+</html>
