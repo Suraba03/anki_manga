@@ -38,7 +38,7 @@ function makeCanvas(rect = { left: 0, top: 0, width: 1000, height: 5000 }) {
 
 // replies: message type -> (msg) => reply. Returns the sandbox handles the tests need.
 // fetch: url -> truthy (a response) or throws; canvas: "ok" | "tainted" (what a canvas copy of an <img> gives).
-async function load({ imgs = [makeImg()], canvases = [], replies: given = {}, fetch: fetchImpl = () => { throw new TypeError("Failed to fetch"); }, canvas = "tainted" } = {}) {
+async function load({ imgs = [makeImg()], canvases = [], replies: given = {}, fetch: fetchImpl = () => { throw new TypeError("Failed to fetch"); }, canvas = "tainted", blobSize = 1000 } = {}) {
   const replies = { "am:page": () => ({ ok: true, page: page([null]) }), ...given };
   const sent = [];
   const timers = [];
@@ -103,7 +103,7 @@ async function load({ imgs = [makeImg()], canvases = [], replies: given = {}, fe
       fetched.push(url);
       const resp = fetchImpl(url);
       if (resp === false) return { ok: false, status: 403 };
-      return { ok: true, blob: async () => ({ tag: url }) };
+      return { ok: true, blob: async () => ({ tag: url, size: blobSize }) };
     },
     FileReader: class {
       readAsDataURL(blob) {
@@ -184,6 +184,9 @@ async function load({ imgs = [makeImg()], canvases = [], replies: given = {}, fe
     intersect: async (img, entry) => {
       env.pageObserver().cb([{ target: img, isIntersecting: true, intersectionRatio: 1, intersectionRect: { height: 0 }, ...entry }]);
       await flush();
+    },
+    deliver: (msg) => {
+      for (const fn of listeners) fn(msg); // synchronously, e.g. from inside a reply
     },
     message: async (msg) => {
       for (const fn of listeners) fn(msg);
@@ -376,6 +379,25 @@ test("a CDN image is fetched too; after a failure the host is not fetched again 
   ]);
 });
 
+test("an HTTP error from a CDN host does not stop the content script from fetching its next image", async () => {
+  const a = makeImg("https://cdn.example/1.jpg");
+  const b = makeImg("https://cdn.example/2.jpg");
+  const env = await load({ imgs: [a, b], fetch: (url) => url.endsWith("1.jpg") ? false : true });
+  await env.intersect(a, {});
+  await env.intersect(b, {});
+  assert.deepEqual(env.fetched, ["https://cdn.example/1.jpg", "https://cdn.example/2.jpg"]);
+  assert.equal(env.ofType("am:page")[1].dataUrl, fake("https://cdn.example/2.jpg"));
+});
+
+test("an image whose data URL would be over 48 MB is left to the worker's own fetch", async () => {
+  const env = await load({ imgs: [makeImg(SAME)], fetch: () => true, blobSize: 40 * 1024 * 1024 }); // 53 MB as base64
+  await env.intersect(env.imgs[0], {});
+  assert.deepEqual(plain(env.ofType("am:page")), [{ type: "am:page", imageUrl: SAME }]);
+  const small = await load({ imgs: [makeImg(SAME)], fetch: () => true, blobSize: 30 * 1024 * 1024 }); // 40 MB
+  await small.intersect(small.imgs[0], {});
+  assert.ok(small.ofType("am:page")[0].dataUrl);
+});
+
 // --- badges and host requests only for manga-sized images -----------------------------------------
 const placeholder = (extra = {}) => {
   const listeners = [];
@@ -518,28 +540,96 @@ test("a tall canvas is captured in slices: the visible part after scrolling stop
   assert.equal(env.captures().length, 2);
 });
 
-test("a slice is not drawn when the page moved while the screenshot was taken; it is taken again once scrolling stops", async () => {
+// A reply that first tells the content script the screenshot was taken (am:capture-taken), then moves the page.
+const withAck = (env, canvas, { before = 0, after = 0, ack = true, n = { count: 1 } } = {}) => (m) => {
+  if (m.probe) return { ok: true };
+  canvas.rect.top += before;
+  if (ack) env.deliver({ type: "am:capture-taken", id: m.id });
+  canvas.rect.top += after;
+  return { ok: true, page: { ...page([null]), page_id: `S${n.count++}` } };
+};
+const loadTall = async (opts) => {
   const canvas = makeCanvas();
-  const n = { count: 1 };
-  let moveOnce = true;
-  const env = await load({
-    canvases: [canvas],
-    replies: { "am:capture": (m) => {
-      if (!m.probe && moveOnce) {
-        moveOnce = false;
-        canvas.rect.top = -100;
-      }
-      return sliceReply(n)(m);
-    } },
-  });
+  const holder = {};
+  const env = await load({ canvases: [canvas], replies: { "am:capture": (m) => holder.reply(m) } });
+  holder.reply = withAck(env, canvas, opts);
+  return { canvas, env };
+};
+
+test("a slice is not drawn when the page moved before the screenshot was taken; it is taken again when scrolling stops", async () => {
+  const canvas = makeCanvas();
+  const holder = {};
+  const env = await load({ canvases: [canvas], replies: { "am:capture": (m) => holder.reply(m) } });
+  let first = true;
+  holder.reply = (m) => withAck(env, canvas, { before: !m.probe && first ? ((first = false), -100) : 0 })(m);
   await env.intersectCanvas(canvas);
   assert.equal(env.captures().length, 1);
   assert.equal(env.handles.length, 0, "the stale reply is dropped");
   assert.ok([...env.badges.values()].every((b) => b.destroyed), "and its badge too");
-  await env.scroll();
-  await env.fire(400);
+  await env.fire(400); // no scroll event needed: a retry is scheduled
   assert.equal(env.captures().length, 2);
   assert.equal(env.handles.length, 1);
+});
+
+test("a slice is kept when the page moves after the screenshot was taken (the overlay follows the page)", async () => {
+  const { canvas, env } = await loadTall({ after: -300 });
+  await env.intersectCanvas(canvas);
+  assert.equal(env.handles.length, 1);
+  assert.equal(env.handles[0].img.getBoundingClientRect().top, -300);
+});
+
+test("without the 'screenshot taken' message the move check is skipped", async () => {
+  const { canvas, env } = await loadTall({ before: -100, ack: false });
+  await env.intersectCanvas(canvas);
+  assert.equal(env.handles.length, 1);
+});
+
+test("the capture requests of different slices carry different ids", async () => {
+  const { canvas, env } = await loadTall();
+  await env.intersectCanvas(canvas);
+  canvas.rect.top = -1500;
+  await env.scroll();
+  await env.fire(400);
+  const ids = env.captures().map((m) => m.id);
+  assert.equal(ids.length, 2);
+  assert.ok(ids[0] != null && ids[0] !== ids[1]);
+});
+
+test("once an element is captured in slices it is never captured whole, e.g. after it shrinks to fit", async () => {
+  const { canvas, env } = await loadTall();
+  await env.intersectCanvas(canvas);
+  assert.equal(env.captures().length, 1);
+  canvas.rect = { left: 0, top: 0, width: 1000, height: 1000 };
+  await env.scroll();
+  await env.fire(400);
+  assert.equal(env.captures().length, 1);
+});
+
+test("the element's own badge (screenshots not allowed yet) goes away once its slices work", async () => {
+  const canvas = makeCanvas();
+  let allowed = false;
+  const n = { count: 1 };
+  const env = await load({
+    canvases: [canvas],
+    replies: { "am:capture": (m) => (m.probe ? (allowed ? { ok: true } : { ok: false, error: "capture_failed" }) : { ok: true, page: { ...page([null]), page_id: `S${n.count++}` } }) },
+  });
+  await env.intersectCanvas(canvas);
+  assert.deepEqual(plain(env.badges.get(canvas).state), { phase: "error", error: "capture_failed" });
+  allowed = true;
+  await env.message({ type: "am:retry" });
+  assert.equal(env.handles.length, 1);
+  const own = env.badges.get(canvas);
+  assert.ok(!own || own.destroyed || own.state === null, "no leftover badge on the element");
+});
+
+test("a tall unreadable <img> loses its 'can't load' badge once its slices work", async () => {
+  const tall = () => ({ left: 0, top: 0, width: 800, height: 5000, right: 800, bottom: 5000 });
+  const img = makeImg(SAME, { getBoundingClientRect: tall });
+  const env = await load({ imgs: [img], replies: { "am:page": () => ({ ok: false, error: "fetch_failed" }), "am:capture": (m) => (m.probe ? { ok: true } : { ok: true, page: { ...page([null]), page_id: "T" } }) } });
+  await env.intersect(img, {});
+  assert.equal(env.handles.length, 1);
+  const own = env.badges.get(img);
+  assert.ok(!own || own.destroyed || own.state === null, "no leftover badge on the element");
 });
 
 test("an image whose src is set after the page was first observed is looked at again", async () => {
@@ -549,4 +639,20 @@ test("an image whose src is set after the page was first observed is looked at a
   img.src = "blob:https://reader.example/9-9-9";
   await env.mutate([{ type: "attributes", target: img }]);
   assert.equal(env.observeLog.filter((e) => e === img).length, 2, "observed again: the observer reports the new state");
+});
+
+test("an image waiting for host permission or for a retry is not started again by a src attribute touch", async () => {
+  const waiting = makeImg(SAME + "?w");
+  const failing = makeImg(SAME + "?f");
+  const env = await load({
+    imgs: [waiting, failing],
+    replies: { "am:page": (m) => (m.imageUrl.endsWith("?w") ? { ok: false, error: "no_image_permission", host: "reader.example" } : { ok: false, error: "engine_error" }) },
+  });
+  await env.intersect(waiting, {});
+  await env.intersect(failing, {});
+  for (const img of [waiting, failing]) {
+    const before = env.observeLog.filter((e) => e === img).length;
+    await env.mutate([{ type: "attributes", target: img }]);
+    assert.equal(env.observeLog.filter((e) => e === img).length, before, img.src);
+  }
 });

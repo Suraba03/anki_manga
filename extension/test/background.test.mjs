@@ -102,7 +102,7 @@ test("am:page with the image bytes skips the host-permission check and passes th
 
 test("am:page rejects a bad or oversized data URL", async () => {
   const before = calls.sent.length;
-  for (const dataUrl of ["https://x.example/p.jpg", 5, "data:" + "A".repeat(64 * 1024 * 1024)]) {
+  for (const dataUrl of ["https://x.example/p.jpg", 5, "data:" + "A".repeat(48 * 1024 * 1024)]) {
     assert.deepEqual(await handlers["am:page"]({ type: "am:page", imageUrl: "https://cdn.example/p.jpg", dataUrl }, tab), { ok: false, error: "bad_image" });
   }
   assert.equal(calls.sent.length, before, "nothing reached the engine");
@@ -128,6 +128,15 @@ test("am:missing-host notes a valid host for the sending tab, nothing else", asy
   await handlers["am:missing-host"]({ type: "am:missing-host", host: 7 }, tab);
   await handlers["am:missing-host"]({ type: "am:missing-host", host: "from-panel.example" }, {});
   assert.deepEqual(session.missingHosts, { 3: ["revoked.example", "cdn.example:8443"] });
+});
+
+test("am:missing-host accepts host names as URL() writes them (underscores, IPv6, ports) and rejects the rest", async () => {
+  for (const key of Object.keys(session)) delete session[key];
+  const good = ["cdn_1.example.com", "[::1]:8080", "cdn.example:8443", "xn--r8jz45g.example"];
+  const bad = ["..", "-", "a..b", "a.b.", "evil.example/x", "*.example", "a b", "user@x.example", "x.example:99999", "", "A.Example"];
+  for (const host of [...good, ...bad]) await handlers["am:missing-host"]({ type: "am:missing-host", host }, tab);
+  assert.deepEqual(session.missingHosts, { 3: good });
+  for (const key of Object.keys(session)) delete session[key];
 });
 
 test("am:capture probe reports whether screenshots are allowed, and marks the tab when not", async () => {

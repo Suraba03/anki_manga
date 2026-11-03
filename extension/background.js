@@ -137,7 +137,8 @@ async function ocrScope() {
   return modelStatus && modelStatus.mode === "on-demand" ? "none" : "all";
 }
 
-const MAX_DATA_URL = 64 * 1024 * 1024;
+// Under Chrome's 64 MB limit for one message, which also carries the envelope.
+const MAX_DATA_URL = 48 * 1024 * 1024;
 
 async function processImage(msg) {
   // The content script already loaded the image the way the page does (its Referer, cookies). Those bytes come from a
@@ -212,6 +213,18 @@ function pngWidth(dataUrl) {
   return ((head.charCodeAt(16) << 24) | (head.charCodeAt(17) << 16) | (head.charCodeAt(18) << 8) | head.charCodeAt(19)) >>> 0;
 }
 
+// A host[:port] as URL() writes it, with proper labels (no "..", "-", wildcards, paths or credentials).
+function validHost(host) {
+  if (typeof host !== "string" || host.includes("*")) return false;
+  try {
+    const u = new URL(`http://${host}`);
+    if (u.host !== host) return false;
+    return u.hostname.startsWith("[") || u.hostname.split(".").every((l) => /^[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?$/.test(l));
+  } catch {
+    return false;
+  }
+}
+
 async function blockCapture(tab) {
   const { captureBlocked = {} } = await chrome.storage.session.get("captureBlocked");
   captureBlocked[tab.id] = true;
@@ -235,6 +248,8 @@ async function captureElement(msg, sender) {
     await blockCapture(tab);
     return { ok: false, error: "capture_failed", detail: String(e.message || e) };
   }
+  // The page may move again while the engine works; the tab only needs to know when the pixels were taken.
+  if (msg.id != null) chrome.tabs.sendMessage(tab.id, { type: "am:capture-taken", id: msg.id }, { frameId: sender.frameId }).catch(() => {});
   const { x, y, width, height } = msg.rect;
   const scale = pngWidth(dataUrl) / msg.viewportWidth; // device pixels per CSS pixel in the capture
   return engineCall({ type: "eng:page", source: { dataUrl, crop: { x, y, width, height, scale } }, ocr: await ocrScope() });
@@ -275,7 +290,7 @@ const handlers = {
   "am:page": processImage,
   // The content script knows the image is a manga page that its host permission is missing for (the panel lists the hosts).
   "am:missing-host": async (msg, sender) => {
-    if (sender.tab && typeof msg.host === "string" && /^[a-z0-9.-]+(:\d+)?$/i.test(msg.host)) await noteMissingHost(sender.tab.id, msg.host);
+    if (sender.tab && validHost(msg.host)) await noteMissingHost(sender.tab.id, msg.host);
     return { ok: true };
   },
   "am:capture": captureElement,

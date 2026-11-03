@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 // Chrome stub for the service worker's message relay. Records every message sent to tabs and to the offscreen document.
 const toTabs = [];
 const toOffscreen = [];
+const tabOptions = []; // third argument of chrome.tabs.sendMessage
 const listeners = [];
 const tabEvents = { removed: [], updated: [] };
 const store = { local: {}, session: {} };
@@ -41,8 +42,9 @@ globalThis.chrome = {
     onRemoved: { addListener: (fn) => tabEvents.removed.push(fn) },
     onUpdated: { addListener: (fn) => tabEvents.updated.push(fn) },
     query: async ({ url }) => tabsAt[url] || [],
-    sendMessage: async (tabId, msg) => {
+    sendMessage: async (tabId, msg, options) => {
       toTabs.push([tabId, msg]);
+      tabOptions.push(options);
     },
     captureVisibleTab: async () => screenshot,
   },
@@ -229,6 +231,24 @@ test("am:capture sends the screenshot and the crop rectangle in device pixels", 
     source: { dataUrl: screenshot, crop: { x: 10, y: 20, width: 300, height: 400, scale: 2 } },
     ocr: "all",
   });
+});
+
+test("am:capture tells the tab (same frame) once the screenshot is taken, before the engine runs", async () => {
+  reset();
+  tabOptions.length = 0;
+  const png = Buffer.alloc(24);
+  png.writeUInt32BE(2000, 16);
+  screenshot = `data:image/png;base64,${png.toString("base64")}`;
+  const send = await startWorker("capture-taken");
+  let toldBeforeEngine = false;
+  engineReply = () => {
+    toldBeforeEngine = toTabs.some(([, m]) => m.type === "am:capture-taken");
+    return { ok: true };
+  };
+  await send({ type: "am:capture", id: 7, rect: { x: 0, y: 0, width: 10, height: 10 }, viewportWidth: 1000 }, { tab: { id: 1, windowId: 1 }, frameId: 3 });
+  assert.deepEqual(toTabs, [[1, { type: "am:capture-taken", id: 7 }]]);
+  assert.deepEqual(tabOptions, [{ frameId: 3 }]);
+  assert.equal(toldBeforeEngine, true);
 });
 
 test("am:prioritize and am:engine are forwarded to the offscreen document", async () => {

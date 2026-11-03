@@ -25,6 +25,7 @@
   const waitingPermission = new Set(); // img elements blocked on image-host permission
   const engineFailures = new Map(); // img -> engine_error count since the last success
   const engineFailed = new Set(); // img elements that gave up after engine_error
+  const retrying = new Set(); // img elements with a retry timer pending
   let hovered = null; // {pageId, bubbleId}
 
   function send(msg) {
@@ -96,10 +97,11 @@
   }
 
   // --- processing -------------------------------------------------------------------------
-  const MAX_DATA_URL = 64 * 1024 * 1024; // the worker's limit (and Chrome's for one message)
+  const MAX_DATA_URL = 48 * 1024 * 1024; // the worker's limit; Chrome's 64 MB per message also has to hold the envelope
   const corsBlocked = new Set(); // hosts whose images this tab could not fetch (no CORS): one console error per host
 
   function toDataUrl(blob) {
+    if ((blob.size * 4) / 3 > MAX_DATA_URL) return Promise.reject(new Error("too big")); // base64 is 4/3 of the bytes
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(reader.result);
@@ -115,12 +117,16 @@
     const u = new URL(url);
     const direct = u.protocol === "blob:" || u.origin === location.origin;
     if ((u.protocol === "blob:" || u.protocol === "http:" || u.protocol === "https:") && (direct || !corsBlocked.has(u.host))) {
+      let resp = null;
       try {
-        const resp = await fetch(url);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        dataUrl = await toDataUrl(await resp.blob());
+        resp = await fetch(url);
       } catch {
-        if (!direct) corsBlocked.add(u.host);
+        if (!direct) corsBlocked.add(u.host); // a TypeError: network or CORS. An HTTP error says nothing about the host.
+      }
+      try {
+        if (resp && resp.ok) dataUrl = await toDataUrl(await resp.blob());
+      } catch {
+        /* unreadable or too big: the next source */
       }
     }
     if (!dataUrl && isShown(img) && PageFinder.realImageUrl(img) === url) {
@@ -136,7 +142,7 @@
         /* cross-origin pixels: the worker fetches it */
       }
     }
-    return dataUrl && dataUrl.length <= MAX_DATA_URL ? dataUrl : null;
+    return dataUrl;
   }
 
   async function loadPage(img, url) {
@@ -183,14 +189,13 @@
     setState(img, { phase: "error", error });
     if (RETRYABLE.has(error)) {
       byImg.delete(img);
-      const delay = RETRY_DELAYS[attempt] ?? RETRY_LATER;
-      setTimeout(() => processImage(img, attempt + 1), delay);
+      retryLater(img, attempt, RETRY_DELAYS[attempt] ?? RETRY_LATER);
     } else if (error === "engine_error") {
       const failures = engineFailures.get(img) || 0;
       engineFailures.set(img, failures + 1);
       if (failures < ENGINE_ERROR_DELAYS.length) {
         byImg.delete(img);
-        setTimeout(() => processImage(img, attempt + 1), ENGINE_ERROR_DELAYS[failures]);
+        retryLater(img, attempt, ENGINE_ERROR_DELAYS[failures]);
       } else {
         byImg.set(img, { key, handle: null, failed: error });
         engineFailed.add(img);
@@ -205,23 +210,40 @@
     }
   }
 
+  function retryLater(img, attempt, delay) {
+    retrying.add(img);
+    setTimeout(() => {
+      retrying.delete(img);
+      processImage(img, attempt + 1);
+    }, delay);
+  }
+
   // The <img> shows its real image (not a lazy placeholder) and the size is known.
   function isShown(img) {
     return img.complete && img.naturalWidth > 1 && !img.src.startsWith("data:");
   }
 
-  // Lazy readers show a placeholder first; draw only once the real image is laid out.
+  // Lazy readers show a placeholder first; draw only once the real image is laid out. One promise per image, so
+  // retries don't stack listeners; forgotten when the reader swaps the src.
+  const displayWaits = new WeakMap();
   function whenDisplayed(img) {
     if (isShown(img)) return Promise.resolve();
-    return new Promise((resolve) => {
-      const done = () => {
-        if (isShown(img)) {
-          img.removeEventListener("load", done);
-          resolve();
-        }
-      };
-      img.addEventListener("load", done);
-    });
+    if (!displayWaits.has(img)) {
+      displayWaits.set(
+        img,
+        new Promise((resolve) => {
+          const done = () => {
+            if (isShown(img)) {
+              img.removeEventListener("load", done);
+              displayWaits.delete(img);
+              resolve();
+            }
+          };
+          img.addEventListener("load", done);
+        }),
+      );
+    }
+    return displayWaits.get(img);
   }
 
   function candidate(img) {
@@ -296,8 +318,9 @@
           byImg.delete(img);
           io.unobserve(img);
           imgs.delete(img);
+          displayWaits.delete(img);
           img.__amWatched = false;
-        } else if (url && !cur && img.__amWatched) {
+        } else if (url && !cur && img.__amWatched && !waitingPermission.has(img) && !retrying.has(img)) {
           // src set after the observer's first report (blob: images a reader builds later): observe again for a new one
           io.unobserve(img);
           io.observe(img);
@@ -327,6 +350,9 @@
   const captureBlocked = new Set(); // waiting for the screenshot permission
   const sliceCovered = new WeakMap(); // tall element -> [from, to] fractions of its height already captured
   const sliceError = new WeakMap(); // tall element -> stand-in carrying the error badge of its last slice
+  const taken = new Map(); // capture id -> {el, top, moved}: the element's top when the request left, and whether it moved by the shot
+  let captureId = 0;
+  let scrollTimer = null;
   let screenshots = null; // the worker's answer to the permission probe: null (not asked) | "ok" | "blocked"
   let scrolling = false;
 
@@ -397,7 +423,9 @@
         }
         const r = el.getBoundingClientRect();
         const vp = { w: window.innerWidth, h: window.innerHeight };
-        if (PageFinder.visibleFraction(r, vp) >= CAPTURE_MIN_VISIBLE) await captureWhole(el, r);
+        if (sliceCovered.has(el)) {
+          if (r.height > CAPTURE_MIN_VISIBLE * vp.h && !scrolling) await captureSliceOf(el, r, vp);
+        } else if (PageFinder.visibleFraction(r, vp) >= CAPTURE_MIN_VISIBLE) await captureWhole(el, r);
         else if (r.height > CAPTURE_MIN_VISIBLE * vp.h && !scrolling) await captureSliceOf(el, r, vp);
         // else a short element that is only partly visible: wait for the whole page
       }
@@ -440,18 +468,27 @@
     sliceError.delete(el);
     const target = sliceTarget(el, s);
     setState(target, { phase: "detecting" });
+    const id = ++captureId;
+    taken.set(id, { el, top: r.top, moved: false });
     const res = await send({
       type: "am:capture",
+      id,
       rect: { x: s.x, y: s.y, width: s.width, height: s.height },
       viewportWidth: vp.w,
     });
+    const shot = taken.get(id);
+    taken.delete(id);
     if (res && res.ok) {
-      if (!el.isConnected || Math.abs(el.getBoundingClientRect().top - r.top) > 2) {
-        dropBadge(target); // the page moved during the round trip: the rows are wrong, try again when it stops
+      // Only a move before the screenshot was taken makes the rows wrong (a later one the overlay follows). No
+      // "taken" message (old worker) means no check.
+      if (!el.isConnected || shot.moved) {
+        dropBadge(target);
+        setTimeout(tryCaptures, SCROLL_IDLE_MS); // a layout shift without a scroll still retriggers
         return;
       }
       covered.push([s.from, s.to]);
       sliceCovered.set(el, covered);
+      dropBadge(el); // the element's own "allow screenshots" / "can't load" badge: its slices work
       showPage(target, `capture:${res.page.page_id}`, res.page);
       return;
     }
@@ -480,7 +517,6 @@
     c.__amWatched = true;
     canvasIo.observe(c);
   }
-  let scrollTimer = null;
   window.addEventListener(
     "scroll",
     () => {
@@ -535,6 +571,9 @@
       }
     } else if (msg.type === "am:perf-mode") {
       if (MODES.has(msg.mode)) applyMode(msg.mode);
+    } else if (msg.type === "am:capture-taken") {
+      const shot = taken.get(msg.id);
+      if (shot) shot.moved = Math.abs(shot.el.getBoundingClientRect().top - shot.top) > 2;
     } else if (msg.type === "am:retry") {
       for (const img of [...engineFailed]) {
         engineFailed.delete(img);
