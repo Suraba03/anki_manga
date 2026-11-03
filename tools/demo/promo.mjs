@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Cdp, OUT, ROOT, installChrome, launch, startServer, waitFor, sleep } from "./common.mjs";
 import { FFMPEG } from "./compose.mjs";
+import { port } from "../ports.mjs";
 
 const NAME = "Manga OCR &amp; Mining for Anki";
 const FONT = `'Helvetica Neue', 'Hiragino Sans', system-ui, sans-serif`;
@@ -47,7 +48,7 @@ const routes = {
   "/small": { type: "text/html; charset=utf-8", body: small },
   "/marquee": { type: "text/html; charset=utf-8", body: marquee },
 };
-const PORT = 9337, SERVE = 47904;
+const PORT = port(9337), SERVE = port(47904);
 const server = await startServer(SERVE, routes);
 const profile = mkdtempSync(join(tmpdir(), "anki-manga-demo-"));
 const chrome = launch(installChrome(), ["--headless=new", `--remote-debugging-port=${PORT}`, `--user-data-dir=${profile}`, "--no-first-run", "about:blank"]);

@@ -7,9 +7,10 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Cdp, EXTENSION, OUT, installChrome, launch, startServer, waitFor, sleep } from "./common.mjs";
+import { port } from "../ports.mjs";
 
-const PORT = 9335;
-const SERVE_PORT = 47902;
+const PORT = port(9335);
+const SERVE_PORT = port(47902);
 const OUR_NAME = JSON.parse(readFileSync(join(EXTENSION, "manifest.json"), "utf8")).name;
 const intended = JSON.parse(readFileSync(join(OUT, "demo-page-bubbles.json"), "utf8"));
 const norm = (t) => t.replace(/[\s　]/g, "").replace(/\.\.\.|…+/g, "…").replace(/[!]/g, "！").replace(/[?]/g, "？");

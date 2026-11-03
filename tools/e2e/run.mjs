@@ -6,6 +6,7 @@
 //   --probe  platform probe: offscreen document, WebGPU session, cross-origin fetch, AnkiConnect
 //            (the AnkiConnect probe runs only when ANKI_RUNNING=1)
 import { FREE_URL } from "../../extension/lib/llm.js";
+import { port } from "../ports.mjs";
 import { spawn, execFileSync } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, existsSync, createReadStream, statSync } from "node:fs";
@@ -16,8 +17,8 @@ import { fileURLToPath } from "node:url";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const CACHE = join(ROOT, "tools/e2e/.cache");
 const EXTENSION = join(ROOT, "extension");
-const PORT = 9333;
-const SERVE_PORT = 47900;
+const PORT = port(9333);
+const SERVE_PORT = port(47900);
 const MIRROR = join(ROOT, "tools/.cache/mirror");
 const PROBE_FETCH_URL = "https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-aarch64-1.20.1.tgz";
 
@@ -157,7 +158,7 @@ function startServer(image) {
 
 // A stand-in for AnkiConnect (the real one is Anki's add-on): records the notes it is asked to add. It listens on
 // its own port and the panel page is pointed at it, so a running Anki is never touched by the test.
-const FAKE_ANKI_PORT = 8766;
+const FAKE_ANKI_PORT = port(8766);
 const FREE_TIER_HOST = new URL(FREE_URL).hostname;
 const REAL_ANKI_PORT = 8765;
 function startFakeAnki() {
