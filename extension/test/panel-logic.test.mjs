@@ -12,6 +12,7 @@ import {
   llmModeAfter,
   validateBaseUrl,
   freeRemainingAfterError,
+  cardDoneState,
 } from "../panel/logic.js";
 
 test("free-tier and no_text copy is exact", () => {
@@ -161,4 +162,9 @@ test("waitForBubbleText gives up after the timeout with the pending reply, and s
   const other = await waitForBubbleText(async () => (n++, { ok: false, error: "unknown_bubble" }), { sleep: async () => {} });
   assert.deepEqual(other, { ok: false, error: "unknown_bubble" });
   assert.equal(n, 1);
+});
+
+test("a card added just now reads as success; one already in the deck stays quiet", () => {
+  assert.deepEqual(cardDoneState("added"), { label: "✓ added", cls: "added" });
+  assert.deepEqual(cardDoneState("in_deck"), { label: "✓ in deck", cls: "have" });
 });

@@ -62,6 +62,9 @@ export const DICT_UNAVAILABLE = "The dictionary could not be loaded — check yo
 // Same scheme as v1, so a picture added twice is stored once by Anki.
 export const pictureFilename = (pageId, bubbleId) => `anki_manga_${pageId.slice(0, 12)}_${bubbleId}.jpg`;
 
+// How a "+" button looks once its card exists: added just now reads as success (green), already in the deck stays grey.
+export const cardDoneState = (outcome) => (outcome === "added" ? { label: "✓ added", cls: "added" } : { label: "✓ in deck", cls: "have" });
+
 export const NO_DECK = "Pick an Anki deck in Settings first.";
 
 // --- own key -------------------------------------------------------------------------------
