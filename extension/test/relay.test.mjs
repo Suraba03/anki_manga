@@ -177,6 +177,8 @@ test("am:page checks image-host permission, then asks the engine to OCR everythi
   granted = false;
   const denied = await send({ type: "am:page", imageUrl: "https://cdn.example/p1.jpg" }, tab(1));
   assert.deepEqual(denied, { ok: false, error: "no_image_permission", host: "cdn.example" });
+  assert.equal(store.session.missingHosts, undefined, "the host is noted when the content script reports it (am:missing-host)");
+  await send({ type: "am:missing-host", host: "cdn.example" }, tab(1));
   assert.deepEqual(store.session.missingHosts, { 1: ["cdn.example"] });
   assert.equal(toOffscreen.length, 0);
 

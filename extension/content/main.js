@@ -96,6 +96,56 @@
   }
 
   // --- processing -------------------------------------------------------------------------
+  const MAX_DATA_URL = 64 * 1024 * 1024; // the worker's limit (and Chrome's for one message)
+  const corsBlocked = new Set(); // hosts whose images this tab could not fetch (no CORS): one console error per host
+
+  function toDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  // The image bytes as the page gets them: this script runs on the page's origin, so a fetch carries the page's Referer
+  // (and, same-origin, its cookies). Else a copy of what the <img> shows. null when neither works.
+  async function pageBytes(img, url) {
+    let dataUrl = null;
+    const u = new URL(url);
+    const direct = u.protocol === "blob:" || u.origin === location.origin;
+    if ((u.protocol === "blob:" || u.protocol === "http:" || u.protocol === "https:") && (direct || !corsBlocked.has(u.host))) {
+      try {
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        dataUrl = await toDataUrl(await resp.blob());
+      } catch {
+        if (!direct) corsBlocked.add(u.host);
+      }
+    }
+    if (!dataUrl && isShown(img) && PageFinder.realImageUrl(img) === url) {
+      // servers that refuse a second load, one-time tokens, blob: images whose fetch failed; a tainted canvas throws
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        canvas.getContext("2d").drawImage(img, 0, 0);
+        const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+        if (blob) dataUrl = await toDataUrl(blob);
+      } catch {
+        /* cross-origin pixels: the worker fetches it */
+      }
+    }
+    return dataUrl && dataUrl.length <= MAX_DATA_URL ? dataUrl : null;
+  }
+
+  async function loadPage(img, url) {
+    const dataUrl = await pageBytes(img, url);
+    if (dataUrl) return send({ type: "am:page", imageUrl: url, dataUrl });
+    if (url.startsWith("blob:")) return { ok: false, error: "fetch_failed" }; // the worker can't open it
+    return send({ type: "am:page", imageUrl: url });
+  }
+
   async function processImage(img, attempt = 0) {
     const url = PageFinder.realImageUrl(img);
     if (!url) return;
@@ -103,11 +153,12 @@
     const current = byImg.get(img);
     if (current && current.key === key && attempt === 0) return;
     byImg.set(img, { key, handle: null });
-    if (!results.has(key) || attempt > 0) setState(img, { phase: "detecting" });
+    // No badge until the image is laid out: a lazy placeholder may turn out to be an icon.
+    if ((!results.has(key) || attempt > 0) && isShown(img)) setState(img, { phase: "detecting" });
 
     let pending = results.get(key);
     if (!pending || attempt > 0) {
-      pending = send({ type: "am:page", imageUrl: url });
+      pending = loadPage(img, url);
       results.set(key, pending);
     }
     const res = await pending;
@@ -117,6 +168,15 @@
       engineFailures.delete(img);
       await whenDisplayed(img);
       if (byImg.get(img) && byImg.get(img).key === key) showPage(img, key, res.page);
+      return;
+    }
+    // An error of an image whose size is not known yet waits for it: a small one is no page, so no badge, no host
+    // request, no screenshot.
+    await whenDisplayed(img);
+    if (!byImg.get(img) || byImg.get(img).key !== key) return; // swapped to another page meanwhile
+    if (!PageFinder.isMangaElement(img)) {
+      byImg.set(img, { key, handle: null, failed: "not_manga" });
+      setState(img, null);
       return;
     }
     const error = res && res.error;
@@ -138,19 +198,24 @@
     } else if (error === "no_image_permission") {
       waitingPermission.add(img);
       byImg.delete(img);
+      send({ type: "am:missing-host", host: res.host }); // the panel lists the hosts to allow
     } else {
       byImg.set(img, { key, handle: null, failed: error });
       if (UNREADABLE.has(error)) queueCapture(img);
     }
   }
 
+  // The <img> shows its real image (not a lazy placeholder) and the size is known.
+  function isShown(img) {
+    return img.complete && img.naturalWidth > 1 && !img.src.startsWith("data:");
+  }
+
   // Lazy readers show a placeholder first; draw only once the real image is laid out.
   function whenDisplayed(img) {
-    const real = () => img.complete && img.naturalWidth > 1 && !img.src.startsWith("data:");
-    if (real()) return Promise.resolve();
+    if (isShown(img)) return Promise.resolve();
     return new Promise((resolve) => {
       const done = () => {
-        if (real()) {
+        if (isShown(img)) {
           img.removeEventListener("load", done);
           resolve();
         }
@@ -161,9 +226,7 @@
 
   function candidate(img) {
     if (!PageFinder.realImageUrl(img)) return false;
-    if (img.complete && img.naturalWidth > 1 && !img.src.startsWith("data:")) {
-      return PageFinder.isMangaImage(img.naturalWidth, img.naturalHeight);
-    }
+    if (isShown(img)) return PageFinder.isMangaImage(img.naturalWidth, img.naturalHeight);
     return true; // lazy placeholder: the background checks the real size after fetching
   }
 
@@ -234,6 +297,10 @@
           io.unobserve(img);
           imgs.delete(img);
           img.__amWatched = false;
+        } else if (url && !cur && img.__amWatched) {
+          // src set after the observer's first report (blob: images a reader builds later): observe again for a new one
+          io.unobserve(img);
+          io.observe(img);
         }
         watch(img);
       }
@@ -253,21 +320,76 @@
 
   // --- screenshot fallback (canvas readers, un-fetchable images) ------------------------------
   const CAPTURE_MIN_VISIBLE = 0.9;
+  const SLICE_MIN_HEIGHT = 400; // CSS px
+  const SCROLL_IDLE_MS = 400; // a slice is taken once scrolling has stopped, else the rows would be wrong
   const captured = new WeakSet();
   const capturePending = new Set();
   const captureBlocked = new Set(); // waiting for the screenshot permission
+  const sliceCovered = new WeakMap(); // tall element -> [from, to] fractions of its height already captured
+  const sliceError = new WeakMap(); // tall element -> stand-in carrying the error badge of its last slice
+  let screenshots = null; // the worker's answer to the permission probe: null (not asked) | "ok" | "blocked"
+  let scrolling = false;
+
+  function dropBadge(el) {
+    const b = badges.get(el);
+    if (!b) return;
+    b.destroy();
+    badges.delete(el);
+    reportSoon();
+  }
+
+  // Waits for the screenshot permission (re-queued on am:retry).
+  function blockCapture(el) {
+    capturePending.delete(el);
+    captured.delete(el);
+    captureBlocked.add(el);
+    setState(el, { phase: "error", error: "capture_failed" });
+  }
 
   function queueCapture(el) {
     if (captured.has(el)) return;
+    if (screenshots === "blocked") return blockCapture(el);
     capturePending.add(el);
     tryCaptures();
   }
 
+  // What the overlay and badge of one slice of a tall element use in place of an element: they only read these two.
+  function sliceTarget(el, s) {
+    return {
+      get isConnected() {
+        return el.isConnected;
+      },
+      getBoundingClientRect() {
+        const r = el.getBoundingClientRect();
+        const left = r.left + s.xFrom * r.width;
+        const top = r.top + s.from * r.height;
+        const width = (s.xTo - s.xFrom) * r.width;
+        const height = (s.to - s.from) * r.height;
+        return { left, top, width, height, x: left, y: top, right: left + width, bottom: top + height };
+      },
+    };
+  }
+
   let captureBusy = false;
+  let captureAgain = false;
   async function tryCaptures() {
-    if (captureBusy) return;
+    if (captureBusy) {
+      captureAgain = true;
+      return;
+    }
     captureBusy = true;
     try {
+      if (!capturePending.size) return;
+      if (!screenshots) {
+        // Ask for the permission before the first screenshot, so the user hears about it while the page is not in view too.
+        const probe = await send({ type: "am:capture", probe: true });
+        if (probe && probe.ok) screenshots = "ok";
+        else if (probe && probe.error === "capture_failed") {
+          screenshots = "blocked";
+          for (const el of [...capturePending]) blockCapture(el);
+          return;
+        }
+      }
       for (const el of [...capturePending]) {
         if (!el.isConnected) {
           capturePending.delete(el);
@@ -275,31 +397,75 @@
         }
         const r = el.getBoundingClientRect();
         const vp = { w: window.innerWidth, h: window.innerHeight };
-        if (PageFinder.visibleFraction(r, vp) < CAPTURE_MIN_VISIBLE) continue;
-        capturePending.delete(el);
-        captured.add(el);
-        setState(el, { phase: "detecting" });
-        const res = await send({
-          type: "am:capture",
-          rect: { x: r.left, y: r.top, width: r.width, height: r.height },
-          viewportWidth: window.innerWidth,
-        });
-        if (res && res.ok) {
-          const key = `capture:${res.page.page_id}`;
-          if (!byImg.get(el) || !byImg.get(el).handle) showPage(el, key, res.page);
-          continue;
-        }
-        setState(el, { phase: "error", error: res && res.error });
-        if (res && RETRYABLE.has(res.error)) {
-          captured.delete(el);
-          setTimeout(() => queueCapture(el), RETRY_LATER);
-        } else if (res && res.error === "capture_failed") {
-          captured.delete(el);
-          captureBlocked.add(el);
-        }
+        if (PageFinder.visibleFraction(r, vp) >= CAPTURE_MIN_VISIBLE) await captureWhole(el, r);
+        else if (r.height > CAPTURE_MIN_VISIBLE * vp.h && !scrolling) await captureSliceOf(el, r, vp);
+        // else a short element that is only partly visible: wait for the whole page
       }
     } finally {
       captureBusy = false;
+      if (captureAgain) {
+        captureAgain = false;
+        tryCaptures();
+      }
+    }
+  }
+
+  async function captureWhole(el, r) {
+    capturePending.delete(el);
+    captured.add(el);
+    setState(el, { phase: "detecting" });
+    const res = await send({
+      type: "am:capture",
+      rect: { x: r.left, y: r.top, width: r.width, height: r.height },
+      viewportWidth: window.innerWidth,
+    });
+    if (res && res.ok) {
+      const key = `capture:${res.page.page_id}`;
+      if (!byImg.get(el) || !byImg.get(el).handle) showPage(el, key, res.page);
+      return;
+    }
+    setState(el, { phase: "error", error: res && res.error });
+    if (res && RETRYABLE.has(res.error)) {
+      captured.delete(el);
+      setTimeout(() => queueCapture(el), RETRY_LATER);
+    } else if (res && res.error === "capture_failed") blockCapture(el);
+  }
+
+  // A page taller than the window never gets 90 % visible: capture what is visible and not yet captured.
+  async function captureSliceOf(el, r, vp) {
+    const covered = sliceCovered.get(el) || [];
+    const s = PageFinder.captureSlice(r, vp, covered, SLICE_MIN_HEIGHT);
+    if (!s) return;
+    if (sliceError.has(el)) dropBadge(sliceError.get(el));
+    sliceError.delete(el);
+    const target = sliceTarget(el, s);
+    setState(target, { phase: "detecting" });
+    const res = await send({
+      type: "am:capture",
+      rect: { x: s.x, y: s.y, width: s.width, height: s.height },
+      viewportWidth: vp.w,
+    });
+    if (res && res.ok) {
+      if (!el.isConnected || Math.abs(el.getBoundingClientRect().top - r.top) > 2) {
+        dropBadge(target); // the page moved during the round trip: the rows are wrong, try again when it stops
+        return;
+      }
+      covered.push([s.from, s.to]);
+      sliceCovered.set(el, covered);
+      showPage(target, `capture:${res.page.page_id}`, res.page);
+      return;
+    }
+    if (res && res.error === "capture_failed") {
+      dropBadge(target);
+      blockCapture(el);
+      return;
+    }
+    setState(target, { phase: "error", error: res && res.error });
+    sliceError.set(el, target);
+    if (res && RETRYABLE.has(res.error)) setTimeout(tryCaptures, RETRY_LATER);
+    else {
+      covered.push([s.from, s.to]); // any other error is final, as for a whole page
+      sliceCovered.set(el, covered);
     }
   }
 
@@ -314,7 +480,20 @@
     c.__amWatched = true;
     canvasIo.observe(c);
   }
-  window.addEventListener("scroll", () => capturePending.size && tryCaptures(), { passive: true, capture: true });
+  let scrollTimer = null;
+  window.addEventListener(
+    "scroll",
+    () => {
+      scrolling = true;
+      clearTimeout(scrollTimer);
+      scrollTimer = setTimeout(() => {
+        scrolling = false;
+        if (capturePending.size) tryCaptures();
+      }, SCROLL_IDLE_MS);
+      if (capturePending.size) tryCaptures();
+    },
+    { passive: true, capture: true },
+  );
 
   // --- keeping overlays aligned -------------------------------------------------------------
   let rafPending = false;
@@ -364,6 +543,7 @@
         processImage(img);
       }
       for (const img of [...waitingPermission]) processImage(img);
+      screenshots = null; // ask for the permission again
       for (const el of [...captureBlocked]) {
         captureBlocked.delete(el);
         queueCapture(el);
