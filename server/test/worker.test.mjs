@@ -2,6 +2,7 @@ import { test, mock, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import worker, { handle, callDeepSeek, makeD1Db } from "../src/worker.js";
+import { parseConfig, originAllowed } from "../src/explain.js";
 import { readFileSync } from "node:fs";
 import { buildMessages } from "../../extension/lib/prompt.js";
 
@@ -274,4 +275,32 @@ test("callDeepSeek reports finish_reason, for logging a rejected answer", async 
   const fetch = async () => Response.json({ choices: [{ message: { content: "   " }, finish_reason: "length" }], usage: {} });
   const out = await callDeepSeek("a", { apiKey: "k", model: "m", fetch });
   assert.equal(out.finishReason, "length");
+});
+
+test("callDeepSeek: a content_filter stop with no content is a paid answer with empty text, not an error", async () => {
+  const usage = { completion_tokens: 0 };
+  const fetch = async () => Response.json({ choices: [{ message: { content: null }, finish_reason: "content_filter" }], usage });
+  const out = await callDeepSeek("a", { apiKey: "k", model: "m", fetch });
+  assert.deepEqual(out, { result: "", usage, finishReason: "content_filter" });
+});
+
+test("a refused line reaches the extension as 422 explanation_refused with CORS", async () => {
+  const res = await handle(req(), ENV, deps({ callLlm: async () => ({ result: "I can't help with that.", usage: {}, finishReason: "stop" }) }));
+  assert.equal(res.status, 422);
+  assert.equal(res.headers.get("Access-Control-Allow-Origin"), ORIGIN);
+  assert.deepEqual(await res.json(), { error: "explanation_refused" });
+});
+
+const STORE_ORIGIN = "chrome-extension://bgfnpifeeclmpfdcahphaiahgafjppeo";
+
+test("wrangler.toml allows exactly the Web Store extension, no wildcard", () => {
+  const toml = readFileSync(new URL("../wrangler.toml", import.meta.url), "utf8");
+  const value = toml.match(/^ALLOWED_ORIGINS = "([^"]*)"$/m)[1];
+  const list = value.split(",").map((s) => s.trim());
+  assert.ok(list.includes(STORE_ORIGIN));
+  assert.ok(list.every((o) => /^chrome-extension:\/\/[a-p]{32}$/.test(o)), `exact extension origins only: ${value}`);
+  const config = parseConfig({ ...ENV, ALLOWED_ORIGINS: value });
+  assert.equal(originAllowed(STORE_ORIGIN, config), true);
+  assert.equal(originAllowed("chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", config), false);
+  assert.equal(originAllowed("https://example.com", config), false);
 });

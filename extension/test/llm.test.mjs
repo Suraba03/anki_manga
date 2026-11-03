@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { SYSTEM_PROMPT, PROMPT_VERSION, buildMessages, parseExplanation } from "../lib/prompt.js";
+import { SYSTEM_PROMPT, PROMPT_VERSION, buildMessages, parseExplanation, isRefusal } from "../lib/prompt.js";
 import { explain, FREE_URL } from "../lib/llm.js";
 
 const GOOD = {
@@ -134,8 +134,8 @@ test("own key: unexpected payload or non-JSON content is bad_response and not ca
   const store = fakeStore();
   assert.deepEqual(await run("x", own(), fakeFetch(() => jsonResponse(200, { choices: [] })), store), { ok: false, error: "bad_response" });
   assert.deepEqual(await run("x", own(), fakeFetch(() => new Response("<html>", { status: 200 })), store), { ok: false, error: "bad_response" });
-  const notJson = { choices: [{ message: { content: "sorry" } }] };
-  assert.deepEqual(await run("x", own(), fakeFetch(() => jsonResponse(200, notJson)), store), { ok: false, error: "bad_response" });
+  const cut = { choices: [{ message: { content: '{"translation": "You can' }, finish_reason: "length" }] };
+  assert.deepEqual(await run("x", own(), fakeFetch(() => jsonResponse(200, cut)), store), { ok: false, error: "bad_response" });
   assert.equal(store.data.size, 0);
 });
 
@@ -397,7 +397,7 @@ test("onError: own-key HTTP failure carries the provider's message but not the k
 });
 
 test("onError: an unparseable success says so", async () => {
-  const { log } = await withLog(TEXT, own(), fakeFetch(() => jsonResponse(200, { choices: [{ message: { content: "not json" } }] })));
+  const { log } = await withLog(TEXT, own(), fakeFetch(() => jsonResponse(200, { choices: [{ message: { content: '{"translation": ' } }] })));
   assert.match(log[0], /bad_response/);
   assert.match(log[0], /invalid JSON/);
 });
@@ -406,4 +406,46 @@ test("own key: a custom provider gets no DeepSeek-only thinking field", async ()
   const f = fakeFetch(() => jsonResponse(200, chatPayload()));
   await run("x", own({ provider: "custom", baseUrl: "https://llm.example.test/v1", model: "m" }), f);
   assert.equal("thinking" in f.calls[0].body, false);
+});
+
+// ---- refusals: the model declined the line ----
+
+test("isRefusal: content_filter, or prose instead of JSON; never a cut, empty or fenced answer", () => {
+  assert.equal(isRefusal("", "content_filter"), true);
+  assert.equal(isRefusal(null, "content_filter"), true);
+  assert.equal(isRefusal("I can't help with that.", "stop"), true);
+  assert.equal(isRefusal("  Sorry, I can't explain this line.  ", null), true);
+  assert.equal(isRefusal('{"translation": "You can', "length"), false, "truncated JSON");
+  assert.equal(isRefusal("Here is the JSON you asked for, it was cut", "length"), false, "cut answers are never refusals");
+  assert.equal(isRefusal("", "stop"), false, "empty");
+  assert.equal(isRefusal("   ", null), false, "blank");
+  assert.equal(isRefusal(null, "stop"), false);
+  assert.equal(isRefusal('```json\n{"translation": "x"}\n```', "stop"), false, "fenced JSON is a format problem");
+  assert.equal(isRefusal('[{"translation": "x"}]', "stop"), false);
+  assert.equal(isRefusal(JSON.stringify(GOOD), "stop"), false);
+});
+
+const chatAnswer = (content, finish_reason = "stop") => ({ choices: [{ message: { content }, finish_reason }] });
+
+test("own key: a declined line is refused, with the reason in the detail, and nothing is cached", async () => {
+  for (const payload of [chatAnswer("I can't help with that."), chatAnswer("", "content_filter"), chatAnswer(null, "content_filter")]) {
+    const store = fakeStore();
+    const log = [];
+    const r = await explain("x", { settings: own(), store, fetch: fakeFetch(() => jsonResponse(200, payload)), freeUrl: FREE_URL_TEST, onError: (d) => log.push(d) });
+    assert.deepEqual(r, { ok: false, error: "refused" });
+    assert.equal(store.data.size, 0);
+    assert.match(log[0], /^refused: finish_reason=/);
+  }
+});
+
+test("own key: a good answer with finish_reason stop is still parsed", async () => {
+  const r = await run("x", own(), fakeFetch(() => jsonResponse(200, chatAnswer(JSON.stringify(GOOD)))));
+  assert.equal(r.ok, true);
+});
+
+test("free mode: 422 explanation_refused is refused, nothing cached; another 422 stays free_unavailable", async () => {
+  const store = fakeStore();
+  assert.deepEqual(await run(TEXT, free(), fakeFetch(() => jsonResponse(422, { error: "explanation_refused" })), store), { ok: false, error: "refused" });
+  assert.equal(store.data.size, 0);
+  assert.deepEqual(await run(TEXT, free(), fakeFetch(() => jsonResponse(422, { error: "other" })), store), { ok: false, error: "free_unavailable" });
 });

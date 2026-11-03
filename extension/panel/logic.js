@@ -19,12 +19,16 @@ const EXPLAIN_MESSAGES = {
   models_loading: ["The OCR models are still loading — try again in a moment.", null],
   text_pending: ["This bubble is still being read — click it again in a moment.", null],
   unknown_bubble: ["This bubble is no longer available — click it again.", null],
+  refused: ["No explanation for this line: the model declined it. The text, readings and dictionary still work.", null],
 };
+const FREE_NOT_COUNTED = " It did not count toward your free limit.";
 
-// -> {text, action}: action "own_key" asks the panel to offer "Use my own API key".
-export function explainErrorMessage(code) {
+// -> {text, action}: action "own_key" asks the panel to offer "Use my own API key". free: the free tier answered
+// (a refusal there says the free limit was not used).
+export function explainErrorMessage(code, { free = false } = {}) {
   const hit = Object.hasOwn(EXPLAIN_MESSAGES, code) && EXPLAIN_MESSAGES[code];
-  return hit ? { text: hit[0], action: hit[1] } : { text: `Something went wrong (${code}).`, action: null };
+  if (!hit) return { text: `Something went wrong (${code}).`, action: null };
+  return { text: code === "refused" && free ? hit[0] + FREE_NOT_COUNTED : hit[0], action: hit[1] };
 }
 
 const MODEL_ERRORS = {

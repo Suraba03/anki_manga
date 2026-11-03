@@ -1,5 +1,5 @@
 // Explains a clicked bubble: local cache first, then the owner's free-tier server or the user's own provider.
-import { PROMPT_VERSION, ExplainError, buildMessages, parseExplanation } from "./prompt.js";
+import { PROMPT_VERSION, ExplainError, buildMessages, parseExplanation, isRefusal } from "./prompt.js";
 
 export const FREE_URL = "https://anki-manga-free.suraba03.workers.dev/explain"; // the free-tier server (server/, Cloudflare Worker)
 const DEEPSEEK_BASE = "https://api.deepseek.com";
@@ -33,6 +33,8 @@ async function callFree(text, { settings, fetch, freeUrl, signal }) {
   if (resp.status === 429 && (body?.error === "free_daily_limit" || body?.error === "free_monthly_cap")) {
     throw new ExplainError(body.error);
   }
+  // The server's word for a line the model declined: no quota was used (server/src/explain.js).
+  if (resp.status === 422 && body?.error === "explanation_refused") throw new ExplainError("refused");
   if (!resp.ok) throw new ExplainError("free_unavailable", `HTTP ${resp.status} ${clip(body?.error)}`.trim());
   let result;
   try {
@@ -77,11 +79,15 @@ async function callOwn(text, { settings, fetch, signal }) {
     throw new ExplainError("bad_response", detail);
   }
   let content;
+  let finishReason;
   try {
-    content = (await resp.json()).choices[0].message.content;
+    const choice = (await resp.json()).choices[0];
+    content = choice.message.content;
+    finishReason = choice.finish_reason ?? null;
   } catch (e) {
     throw new ExplainError(signal?.aborted ? "network" : "bad_response", signal?.aborted ? "timeout" : "unexpected payload");
   }
+  if (isRefusal(content, finishReason)) throw new ExplainError("refused", `finish_reason=${finishReason ?? "?"}`);
   return { result: parseExplanation(content), remaining: null };
 }
 
