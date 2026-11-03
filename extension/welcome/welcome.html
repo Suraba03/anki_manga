@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Welcome to Manga Mining</title>
+  <link rel="stylesheet" href="../panel/panel.css">
+  <link rel="stylesheet" href="welcome.css">
+</head>
+<body>
+  <main class="welcome">
+    <img class="logo" src="../icons/icon128.png" alt="" width="64" height="64">
+    <h1>Welcome to Manga Mining</h1>
+
+    <section class="progress">
+      <p id="status" class="status" data-state="warming">Starting…</p>
+      <p id="status-note" class="note-line" hidden></p>
+    </section>
+
+    <p>OCR runs on your computer, so the text-recognition models (about 340 MB) download once.
+      After that the extension starts in seconds. Page images never leave your computer.</p>
+
+    <h2 id="next-title">While you wait</h2>
+    <ol class="steps">
+      <li>Open a manga page.</li>
+      <li>Click the extension icon in the toolbar to open the side panel.</li>
+      <li>Click “Enable on this site”.</li>
+      <li><b>Click</b> a speech bubble to see its reading, a translation and why it's written that way.</li>
+    </ol>
+    <p id="background-note" class="muted">You can close this tab: the download keeps going in the background.</p>
+  </main>
+  <script type="module" src="welcome.js"></script>
+</body>
+</html>

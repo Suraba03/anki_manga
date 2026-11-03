@@ -33,11 +33,27 @@ const MODEL_ERRORS = {
   models_cleared: ["Models deleted.", "Download again"],
 };
 
-// modelStatus ({state, progress, ep, error}) -> {kind: "ready"|"warming"|"down", text, retry: button label | null}
+const STARTING = "Starting the OCR engine…";
+
+// Non-breaking spaces inside each chunk: a narrow panel wraps the line after the comma, not inside "120 / 337 MB".
+const unbroken = (s) => s.replace(/ /g, "\u00a0");
+
+function timeLeft(sec) {
+  if (sec == null) return "";
+  return `, ${unbroken(sec < 60 ? "less than a minute left" : `about ${Math.round(sec / 60)} min left`)}`;
+}
+
+// modelStatus ({state, progress, receivedBytes, totalBytes, etaSec, firstRun, ep, error}; engine/startup.js)
+// -> {kind: "ready"|"warming"|"down", text, retry: button label | null}. Shared by the panel and the welcome page.
 export function modelStatusLine(s) {
   if (!s) return { kind: "warming", text: "Starting…", retry: null };
-  if (s.state === "downloading") return { kind: "warming", text: `Downloading models… ${Math.floor((s.progress || 0) * 100)}%`, retry: null };
-  if (s.state === "loading") return { kind: "warming", text: "Loading models…", retry: null };
+  if (s.state === "downloading") {
+    // No size yet, or nothing to download (warm start): the engine is starting, not downloading.
+    if (!(s.totalBytes > 0)) return { kind: "warming", text: STARTING, retry: null };
+    const mb = (bytes) => Math.round(bytes / 1e6);
+    return { kind: "warming", text: `Downloading models: ${unbroken(`${mb(s.receivedBytes || 0)} / ${mb(s.totalBytes)} MB`)}${timeLeft(s.etaSec)}`, retry: null };
+  }
+  if (s.state === "loading") return { kind: "warming", text: s.firstRun ? "Preparing models (first run only)…" : STARTING, retry: null };
   if (s.state === "ready") return { kind: "ready", text: `Ready (${s.ep === "webgpu" ? "WebGPU" : "CPU"})`, retry: null };
   const [text, retry] = (Object.hasOwn(MODEL_ERRORS, s.error) && MODEL_ERRORS[s.error]) || ["The OCR engine failed to start.", "Retry"];
   return { kind: "down", text, retry };

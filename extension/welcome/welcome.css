@@ -1,0 +1,15 @@
+/* Welcome tab: the panel's tokens (panel.css), laid out as a page. */
+body { font-size: 15px; }
+.welcome { max-width: 560px; margin: 48px auto; padding: 0 16px; }
+.logo { display: block; margin-bottom: 8px; }
+h1 { font-size: 24px; margin: 0 0 16px; }
+h2 { font-size: 15px; margin: 24px 0 6px; }
+.progress {
+  padding: 10px 12px; margin-bottom: 16px; background: var(--card);
+  border: 1px solid var(--line); border-radius: 6px;
+}
+.progress .status { font-size: 15px; color: var(--text); margin: 0; }
+.note-line { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+.steps { padding-left: 22px; }
+.steps li { margin: 4px 0; }
+.muted { color: var(--muted); font-size: 13px; }
