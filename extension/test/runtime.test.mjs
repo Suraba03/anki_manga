@@ -42,6 +42,8 @@ test("chooseBackend: configures ORT before probing when ort is given", async () 
 });
 
 // Fake engine on an injected clock: detect/ocr advance the clock by a fixed amount.
+const pickMode = (r) => ({ msPerPage: r.msPerPage, mode: r.mode });
+
 function fakeEngine({ detectMs, ocrMs, bubbles = [{ box: [1, 2, 3, 4] }] }) {
   let t = 0;
   const calls = [];
@@ -59,7 +61,7 @@ function fakeEngine({ detectMs, ocrMs, bubbles = [{ box: [1, 2, 3, 4] }] }) {
 test("runBenchmark: detect 1000 ms + 12 x ocr 200 ms -> 3400, prefetch", async () => {
   const f = fakeEngine({ detectMs: 1000, ocrMs: 200 });
   const r = await runBenchmark(f.engine, { data: new Uint8ClampedArray(4), width: 1, height: 1 }, { now: f.now });
-  assert.deepEqual(r, { msPerPage: 3400, mode: "prefetch" });
+  assert.deepEqual(pickMode(r), { msPerPage: 3400, mode: "prefetch" });
   assert.equal(f.calls.length, 2); // one untimed warm-up OCR + one timed OCR
   assert.deepEqual(f.calls[0].box, [1, 2, 3, 4]);
 });
@@ -67,20 +69,20 @@ test("runBenchmark: detect 1000 ms + 12 x ocr 200 ms -> 3400, prefetch", async (
 test("runBenchmark: ocr 500 ms -> on-demand", async () => {
   const f = fakeEngine({ detectMs: 1000, ocrMs: 500 });
   const r = await runBenchmark(f.engine, makeBenchmarkPage(), { now: f.now });
-  assert.deepEqual(r, { msPerPage: 7000, mode: "on-demand" });
+  assert.deepEqual(pickMode(r), { msPerPage: 7000, mode: "on-demand" });
 });
 
 test("runBenchmark: exactly 6000 ms is on-demand", async () => {
   const f = fakeEngine({ detectMs: 0, ocrMs: 500 });
   const r = await runBenchmark(f.engine, makeBenchmarkPage(), { now: f.now });
-  assert.deepEqual(r, { msPerPage: 6000, mode: "on-demand" });
+  assert.deepEqual(pickMode(r), { msPerPage: 6000, mode: "on-demand" });
 });
 
 test("runBenchmark: no detected bubble -> OCR on a fixed box inside the page", async () => {
   const f = fakeEngine({ detectMs: 100, ocrMs: 10, bubbles: [] });
   const page = makeBenchmarkPage();
   const r = await runBenchmark(f.engine, page, { now: f.now });
-  assert.deepEqual(r, { msPerPage: 220, mode: "prefetch" });
+  assert.deepEqual(pickMode(r), { msPerPage: 220, mode: "prefetch" });
   const [x1, y1, x2, y2] = f.calls[0].box;
   assert.ok(x1 >= 0 && y1 >= 0 && x2 <= page.width && y2 <= page.height && x2 > x1 && y2 > y1);
 });
@@ -93,7 +95,7 @@ test("runBenchmark: an untimed warm-up (detect + ocr) runs first and is not coun
     ocr: async (rgba, bubble) => { calls.push(bubble); t += 200; return "x"; },
   };
   const r = await runBenchmark(engine, makeBenchmarkPage(), { now: () => t });
-  assert.deepEqual(r, { msPerPage: 3400, mode: "prefetch" });
+  assert.deepEqual(pickMode(r), { msPerPage: 3400, mode: "prefetch" });
   assert.equal(detects, 2);
   assert.equal(calls.length, 2);
 });
@@ -254,4 +256,10 @@ test("createEngine: real models detect + benchmark (wasm set)", { skip: !modelDi
   const r = await runBenchmark(engine, page);
   assert.equal(typeof r.msPerPage, "number");
   assert.ok(["prefetch", "on-demand"].includes(r.mode));
+});
+
+test("runBenchmark reports its parts: the untimed warm-up and the timed detect and OCR", async () => {
+  const f = fakeEngine({ detectMs: 1000, ocrMs: 200 });
+  const r = await runBenchmark(f.engine, makeBenchmarkPage(), { now: f.now });
+  assert.deepEqual([r.warmupMs, r.detectMs, r.ocrMs], [1200, 1000, 200]);
 });

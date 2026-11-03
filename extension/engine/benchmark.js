@@ -21,16 +21,28 @@ export function makeBenchmarkPage() {
   return { data, width, height };
 }
 
-// engine: {detect(rgba), ocr(rgba, bubble)}. msPerPage = detect + 12 x one OCR (a page holds about 12 bubbles).
-// One untimed warm-up pass first: the first run includes shader/graph compilation, which would skew the result.
-export async function runBenchmark(engine, rgba, { now = () => performance.now() } = {}) {
+// The first inference compiles the shaders/graphs: one untimed detect + OCR. It also proves the backend works.
+export async function warmUp(engine, rgba) {
   const warm = await engine.detect(rgba);
   await engine.ocr(rgba, warm[0] ?? { box: FALLBACK_BOX });
+}
+
+// engine: {detect(rgba), ocr(rgba, bubble)}, already warmed up. msPerPage = detect + 12 x one OCR (a page holds
+// about 12 bubbles). Also returns the parts: detectMs and ocrMs.
+export async function measure(engine, rgba, { now = () => performance.now() } = {}) {
   const t0 = now();
   const bubbles = await engine.detect(rgba);
   const t1 = now();
   await engine.ocr(rgba, bubbles[0] ?? { box: FALLBACK_BOX });
   const t2 = now();
   const msPerPage = (t1 - t0) + BUBBLES_PER_PAGE * (t2 - t1);
-  return { msPerPage, mode: msPerPage < PREFETCH_UNDER_MS ? "prefetch" : "on-demand" };
+  return { msPerPage, mode: msPerPage < PREFETCH_UNDER_MS ? "prefetch" : "on-demand", detectMs: t1 - t0, ocrMs: t2 - t1 };
+}
+
+// Warm-up, then the timed pass (warmupMs is the untimed part).
+export async function runBenchmark(engine, rgba, { now = () => performance.now() } = {}) {
+  const tw = now();
+  await warmUp(engine, rgba);
+  const warmupMs = now() - tw;
+  return { ...(await measure(engine, rgba, { now })), warmupMs };
 }

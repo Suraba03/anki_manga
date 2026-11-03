@@ -15,6 +15,8 @@ import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, existsSync, 
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+import { makeBenchmarkPage } from "../../extension/engine/benchmark.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const CACHE = join(ROOT, "tools/e2e/.cache");
@@ -136,9 +138,20 @@ async function probe(sw) {
   return !failed;
 }
 
-// Serves one sample page (as /page.jpg inside a plain HTML page; none when image is null) and the mirrored model
-// files (/models/<name>).
+// Synthetic pages for timing the first real detects (the benchmark page at different JPEG qualities: different bytes,
+// so none is served from the page cache). jpeg-js is a dev dependency of extension/.
+function syntheticPages() {
+  const jpeg = createRequire(join(EXTENSION, "package.json"))("jpeg-js");
+  const page = makeBenchmarkPage();
+  const rgba = { data: Buffer.from(page.data.buffer), width: page.width, height: page.height };
+  const qualities = { "cold-a": 90, "cold-b": 85, "warm-a": 80, "warm-b": 75 }; // fresh bytes for each start
+  return Object.fromEntries(Object.entries(qualities).map(([name, q]) => [`/synthetic-${name}.jpg`, jpeg.encode(rgba, q).data]));
+}
+
+// Serves one sample page (as /page.jpg inside a plain HTML page; none when image is null), the synthetic pages and
+// the mirrored model files (/models/<name>).
 function startServer(image) {
+  const synthetic = syntheticPages();
   const server = createServer((req, res) => {
     const path = decodeURIComponent(req.url.split("?")[0]);
     if (image && path === "/") {
@@ -147,6 +160,9 @@ function startServer(image) {
     } else if (image && path === "/page.jpg") {
       res.setHeader("Content-Type", "image/jpeg");
       createReadStream(image).pipe(res);
+    } else if (synthetic[path]) {
+      res.setHeader("Content-Type", "image/jpeg");
+      res.end(synthetic[path]);
     } else if (path.startsWith("/models/") && !path.includes("..") && existsSync(join(MIRROR, path.slice(8)))) {
       const file = join(MIRROR, path.slice(8));
       res.setHeader("Content-Length", statSync(file).size);
@@ -297,7 +313,7 @@ async function bootEngine(sw) {
 }
 
 // Stage names in start-up order (chrome.storage hands the keys back sorted, so the order is restored here).
-const STAGE_ORDER = ["files", "probe", "create", "benchmark", "total"];
+const STAGE_ORDER = ["files", "probe", "create", "ready", "warmup", "benchmark", "total"];
 const stagesOf = (timings) =>
   Object.keys(timings || {})
     .filter((k) => k !== "files")
@@ -326,7 +342,20 @@ async function firstRun(launch) {
         await waitFor(() => sw.evaluate('typeof handlers === "object"'), "background.js to load");
         await sw.evaluate(`chrome.storage.local.set({devModelBase: ${JSON.stringify(`http://127.0.0.1:${SERVE_PORT}/models/`)}})`);
         console.log(`--- ${kind} start`);
-        const status = await bootEngine(sw);
+        await bootEngine(sw);
+        // "ready" comes before the warm-up: how long does a page asked for right then take, and the next one?
+        const origin = `http://127.0.0.1:${SERVE_PORT}`;
+        await sw.evaluate(`handlers["am:enable-site"]({origin: ${JSON.stringify(origin)}}, {})`);
+        for (const name of ["a", "b"]) {
+          const t = Date.now();
+          const r = await sw.evaluate(`engineCall(${JSON.stringify({ type: "eng:page", source: { url: `${origin}/synthetic-${kind}-${name}.jpg` }, ocr: "none" })})`);
+          console.log(`  ${name === "a" ? "first" : "second"} page after ready: ${secs(Date.now() - t)} (${r.ok ? `${r.page.bubbles.length} bubbles` : r.error})`);
+        }
+        const status = await waitFor(async () => {
+          const s = await sw.evaluate('chrome.storage.session.get("modelStatus").then((r) => r.modelStatus || null)');
+          return s && s.timings && s.timings.total != null ? s : null;
+        }, "the engine to settle", 120000);
+        console.log(`  settled: ep=${status.ep} mode=${status.mode}`);
         printTimings(status);
         runs.push([kind, status]);
       } finally {
