@@ -3,7 +3,7 @@
 // the free-tier proxy. Used by screenshots.mjs and video.mjs.
 //
 // Safety, same as tools/e2e/run.mjs: the real AnkiConnect (port 8765) is never reached. Every request of the panel
-// page passes through a Fetch guard: one aimed at 8765 is redirected to the fake on 8766, or failed.
+// page passes through a Fetch guard: one aimed at 8765 is redirected to the fake (8766 + ANKI_MANGA_PORT_OFFSET), or failed.
 // Free tier: the panel's requests to the free server are made here (node) so they can be counted and, while
 // developing, answered from tools/.cache/demo-free.json (recorded real answers). --live always asks the server.
 import { mkdtempSync, mkdirSync, existsSync, readFileSync, writeFileSync, rmSync, cpSync } from "node:fs";
@@ -13,11 +13,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { FREE_URL } from "../../extension/lib/llm.js";
 import { Cdp, EXTENSION, OUT, ROOT, installChrome, launch, startServer, waitFor, sleep } from "./common.mjs";
+import { port } from "../ports.mjs";
 
 // Frame: 1280x800 = a 60 px headline/caption strip on top + [reader 759 | 1 px divider | panel 520] x 740.
 // The panel page is zoomed 1.25x (CSS zoom, so text stays vector-sharp) to make its text larger in the thumbnails.
 export const VIEW = { readerW: 759, panelW: 520, panelZoom: 1.25, h: 740, topH: 60 };
-const FAKE_ANKI_PORT = 8766;
+const FAKE_ANKI_PORT = port(8766);
 const REAL_ANKI_PORT = 8765;
 const FREE_HOST = new URL(FREE_URL).hostname;
 const FREE_CACHE = join(ROOT, "tools/.cache/demo-free.json");
@@ -103,7 +104,7 @@ function startFakeAnki() {
   });
 }
 
-export async function startSession({ port = 9336, servePort = 47903, live = false } = {}) {
+export async function startSession({ port: cdpPort = port(9336), servePort = port(47903), live = false } = {}) {
   const origin = `http://${SITE_HOST}`; // port 80 is mapped to the local server below
   const server = await startServer(servePort, {
     "/": { type: "text/html; charset=utf-8", body: READER_HTML },
@@ -125,10 +126,10 @@ export async function startSession({ port = 9336, servePort = 47903, live = fals
   writeFileSync(manifestFile, JSON.stringify(manifest, null, 2));
   const chrome = launch(installChrome(), [
     "--headless=new", `--load-extension=${extCopy}`, `--host-resolver-rules=MAP ${SITE_HOST}:80 127.0.0.1:${servePort}`, "--disable-features=DisableLoadExtensionCommandLineSwitch",
-    "--enable-unsafe-webgpu", `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, "--no-first-run", "about:blank",
+    "--enable-unsafe-webgpu", `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${profile}`, "--no-first-run", "about:blank",
   ]);
   const s = { origin, anki, free: { requests: 0, live: 0 }, redirected: 0, tabs: [] };
-  const base = `http://127.0.0.1:${port}`;
+  const base = `http://127.0.0.1:${cdpPort}`;
 
   s.close = async () => {
     for (const t of s.tabs) t.close();

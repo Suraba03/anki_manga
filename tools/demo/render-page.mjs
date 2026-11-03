@@ -5,9 +5,10 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Cdp, OUT, ROOT, installChrome, launch, startServer, waitFor, sleep } from "./common.mjs";
+import { port } from "../ports.mjs";
 
-const PORT = 9334;
-const SERVE_PORT = 47901;
+const PORT = port(9334);
+const SERVE_PORT = port(47901);
 const W = 880, H = 1250;
 
 mkdirSync(OUT, { recursive: true });
