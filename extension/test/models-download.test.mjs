@@ -235,7 +235,7 @@ test("onProgress(1) is reported when everything was cached", async () => {
   await ensureFiles(files, { cache, fetch: fakeFetch(served()), onProgress() {} });
   const seen = [];
   await ensureFiles(files, { cache, fetch: fakeFetch({}), onProgress: (f) => seen.push(f) });
-  assert.deepEqual(seen, [1]);
+  assert.deepEqual(seen, [0, 1], "the size announcement (nothing to download), then done");
 });
 
 test("clearModels empties the cache so the next call downloads again", async () => {
@@ -282,4 +282,44 @@ test("the committed manifest is well formed: pinned release URLs, sha256, unique
     }
   }
   assert.equal(sets.webgpu.vocab.sha256, sets.wasm.vocab.sha256);
+});
+
+// A clock that moves 5 ms on every read, so every measured span is positive and deterministic in order.
+function tickingClock() {
+  let t = 0;
+  return () => (t += 5);
+}
+
+test("progress carries received and total bytes of the files that need downloading", async () => {
+  const cache = fakeCache();
+  cache.store.set(files[0].url, A.slice().buffer); // a.onnx cached: only b.onnx counts
+  const seen = [];
+  await ensureFiles(files, { cache, fetch: fakeFetch(served()), onProgress: (p, info) => seen.push([p, info.receivedBytes, info.totalBytes]) });
+  assert.deepEqual(seen[0], [0, 0, B.length], "the size is announced before the first byte");
+  assert.deepEqual(seen.at(-1), [1, B.length, B.length]);
+  for (const [, got, total] of seen) assert.ok(got <= total);
+});
+
+test("a warm start (everything cached) reports totalBytes 0", async () => {
+  const cache = fakeCache();
+  await ensureFiles(files, { cache, fetch: fakeFetch(served()), onProgress() {} });
+  const seen = [];
+  await ensureFiles(files, { cache, fetch: fakeFetch({}), onProgress: (p, info) => seen.push([p, info.totalBytes]) });
+  assert.deepEqual(seen, [[0, 0], [1, 0]]);
+});
+
+test("per-file timings: cache read + hash for a hit, download + hash + cache write for a miss", async () => {
+  const cache = fakeCache();
+  cache.store.set(files[0].url, A.slice().buffer);
+  let last;
+  await ensureFiles(files, { cache, fetch: fakeFetch(served()), onProgress: (p, info) => (last = info), now: tickingClock() });
+  const [a, b] = last.files;
+  assert.equal(a.name, "a.onnx");
+  assert.equal(a.source, "cache");
+  assert.equal(a.bytes, A.length);
+  assert.ok(a.readMs > 0 && a.hashMs > 0);
+  assert.equal(b.name, "b.onnx");
+  assert.equal(b.source, "network");
+  assert.equal(b.bytes, B.length);
+  assert.ok(b.downloadMs > 0 && b.hashMs > 0 && b.putMs > 0);
 });

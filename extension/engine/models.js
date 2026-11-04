@@ -75,14 +75,23 @@ async function readBody(res, size, onBytes) {
 // Map<name, ArrayBuffer> of verified bytes. A cached file is re-hashed and dropped if it no longer matches.
 // Each file is cached as soon as it verifies (a later failure keeps the earlier ones: resume per file);
 // a file that fails verification is never stored.
-export async function ensureFiles(files, { cache, fetch: fetchFn = globalThis.fetch, onProgress = () => {} }) {
+// onProgress(fraction, {receivedBytes, totalBytes, files}): totalBytes counts only the files that need downloading
+// (0 on a warm start) and is announced once the cache is checked, before the first byte. `files` holds a timing
+// record per finished file: {name, source: "cache", bytes, readMs, hashMs} or
+// {name, source: "network", bytes, downloadMs, hashMs, putMs}.
+export async function ensureFiles(files, { cache, fetch: fetchFn = globalThis.fetch, onProgress = () => {}, now = () => performance.now() }) {
   const result = new Map();
   const missing = [];
+  const timings = [];
   for (const f of files) {
+    const t0 = now();
     const hit = await cache.match(f.url);
     if (hit) {
       const buf = await hit.arrayBuffer();
-      if ((await sha256Hex(buf)) === f.sha256) {
+      const t1 = now();
+      const ok = (await sha256Hex(buf)) === f.sha256;
+      if (ok) {
+        timings.push({ name: f.name, source: "cache", bytes: buf.byteLength, readMs: t1 - t0, hashMs: now() - t1 });
         result.set(f.name, buf);
         continue;
       }
@@ -93,9 +102,12 @@ export async function ensureFiles(files, { cache, fetch: fetchFn = globalThis.fe
 
   const totalBytes = missing.reduce((n, f) => n + f.bytes, 0);
   let received = 0;
-  const report = () => onProgress(Math.min(received / totalBytes, 0.999));
+  const info = () => ({ receivedBytes: received, totalBytes, files: timings.slice() });
+  const report = () => onProgress(totalBytes ? Math.min(received / totalBytes, 0.999) : 0, info());
+  report();
   for (const f of missing) {
     let body;
+    const t0 = now();
     try {
       const res = await fetchFn(f.url);
       if (!res.ok) {
@@ -110,16 +122,19 @@ export async function ensureFiles(files, { cache, fetch: fetchFn = globalThis.fe
       if (e instanceof ModelError) throw e;
       throw new ModelError("model_download_failed", `${f.name}: ${e?.message || e}`);
     }
+    const t1 = now();
     if (body.length !== f.bytes || (await sha256Hex(body.out)) !== f.sha256) throw new ModelError("model_corrupt", f.name);
+    const t2 = now();
     try {
       await cache.put(f.url, new Response(body.out));
     } catch (e) {
       await cache.delete(f.url).catch(() => {});
       throw new ModelError("model_download_failed", `cache write failed: ${e?.message || e}`);
     }
+    timings.push({ name: f.name, source: "network", bytes: body.length, downloadMs: t1 - t0, hashMs: t2 - t1, putMs: now() - t2 });
     result.set(f.name, body.out.buffer);
   }
-  onProgress(1);
+  onProgress(1, info());
   return new Map(files.map((f) => [f.name, result.get(f.name)]));
 }
 

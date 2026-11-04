@@ -61,3 +61,14 @@ test("summary for the panel", () => {
   assert.equal(Status.summaryText({ ready: 6, working: 0, failed: 0 }), "Pages: 6 ready");
   assert.equal(Status.summaryText({ ready: 0, working: 0, failed: 0 }), "No manga pages found yet");
 });
+
+test("engine busy with a download: the badge shows the size, then that the models are being prepared", () => {
+  const down = (receivedBytes, totalBytes) => ({ phase: "error", error: "models_downloading", models: { receivedBytes, totalBytes } });
+  assert.deepEqual(Status.badge(down(120e6, 336.7e6)), { text: "⏳ models 120/337 MB", kind: "busy" });
+  assert.equal(Status.badge(down(0, 336.7e6)).text, "⏳ models 0/337 MB");
+  assert.equal(Status.badge({ phase: "error", error: "models_loading", models: { firstRun: true } }).text, "⏳ preparing models…");
+  // No size (not known yet, or nothing to download) and a warm load: the engine is starting.
+  assert.equal(Status.badge(down(0, 0)).text, "⏳ starting OCR…");
+  assert.equal(Status.badge({ phase: "error", error: "models_loading", models: { firstRun: false } }).text, "⏳ starting OCR…");
+  assert.equal(Status.badge({ phase: "error", error: "models_loading" }).text, "⏳ loading models…", "an engine without the field");
+});

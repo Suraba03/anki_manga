@@ -50,9 +50,22 @@ test("unknown codes name the code", () => {
 });
 
 test("model status line", () => {
-  assert.deepEqual(modelStatusLine({ state: "downloading", progress: 0.4237 }), { kind: "warming", text: "Downloading models… 42%", retry: null });
-  assert.deepEqual(modelStatusLine({ state: "downloading", progress: 0 }), { kind: "warming", text: "Downloading models… 0%", retry: null });
-  assert.deepEqual(modelStatusLine({ state: "loading", progress: 1, ep: "webgpu" }), { kind: "warming", text: "Loading models…", retry: null });
+  const line = (s) => modelStatusLine(s).text.replace(/\u00a0/g, " "); // see the wrap test below
+  const MB = 1e6;
+  const down = (received, total, etaSec) => ({ state: "downloading", progress: received / total, receivedBytes: received, totalBytes: total, etaSec });
+  assert.equal(modelStatusLine(down(120 * MB, 336.7 * MB, 130)).kind, "warming");
+  assert.equal(line(down(120 * MB, 336.7 * MB, 130)), "Downloading models: 120 / 337 MB, about 2 min left");
+  // A narrow panel may break the line only between the chunks.
+  assert.deepEqual(modelStatusLine(down(120 * MB, 336.7 * MB, 130)).text.split(" "), ["Downloading", "models:", "120\u00a0/\u00a0337\u00a0MB,", "about\u00a02\u00a0min\u00a0left"]);
+  assert.equal(line(down(0, 336.7 * MB, null)), "Downloading models: 0 / 337 MB", "no estimate yet");
+  assert.equal(line(down(300 * MB, 336.7 * MB, 40)), "Downloading models: 300 / 337 MB, less than a minute left");
+  assert.equal(line(down(10 * MB, 336.7 * MB, 61 * 60)), "Downloading models: 10 / 337 MB, about 61 min left");
+  // Before the size is known, or when everything is cached (warm start): no "Downloading".
+  assert.equal(line({ state: "downloading", progress: 0 }), "Starting the OCR engine…");
+  assert.equal(line({ state: "downloading", progress: 1, receivedBytes: 0, totalBytes: 0 }), "Starting the OCR engine…");
+  assert.deepEqual(modelStatusLine({ state: "loading", progress: 1, ep: "webgpu", firstRun: true }), { kind: "warming", text: "Preparing models (first run only)…", retry: null });
+  assert.equal(line({ state: "loading", progress: 1, ep: "webgpu", firstRun: false }), "Starting the OCR engine…");
+  assert.equal(line({ state: "loading", progress: 1, ep: "webgpu" }), "Starting the OCR engine…");
   assert.deepEqual(modelStatusLine({ state: "ready", ep: "webgpu" }), { kind: "ready", text: "Ready (WebGPU)", retry: null });
   assert.deepEqual(modelStatusLine({ state: "ready", ep: "wasm" }), { kind: "ready", text: "Ready (CPU)", retry: null });
   assert.deepEqual(modelStatusLine({ state: "error", error: "model_download_failed" }), {

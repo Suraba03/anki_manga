@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 // End-to-end harness: launches Chrome for Testing with the unpacked extension and drives its
-// service worker over CDP.   node tools/e2e/run.mjs [--probe | --smoke]
+// service worker over CDP.   node tools/e2e/run.mjs [--probe | --smoke | --first-run]
 //   --smoke  end to end: serves the sample pages (ANKI_MANGA_SAMPLES) and the mirrored models (tools/.cache/mirror)
 //            on 127.0.0.1:47900, loads the first page in a tab and waits for the overlay to show its texts
+//   --first-run  start-up timings: serves the mirrored models (no samples needed), boots the engine on an empty
+//            profile (cold), restarts Chrome on the same profile (warm) and prints each stage of both starts
 //   --probe  platform probe: offscreen document, WebGPU session, cross-origin fetch, AnkiConnect
 //            (the AnkiConnect probe runs only when ANKI_RUNNING=1)
 import { FREE_URL } from "../../extension/lib/llm.js";
@@ -13,6 +15,8 @@ import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, existsSync, 
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+import { makeBenchmarkPage } from "../../extension/engine/benchmark.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const CACHE = join(ROOT, "tools/e2e/.cache");
@@ -23,7 +27,7 @@ const MIRROR = join(ROOT, "tools/.cache/mirror");
 const PROBE_FETCH_URL = "https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-aarch64-1.20.1.tgz";
 
 const OUR_NAME = JSON.parse(readFileSync(join(EXTENSION, "manifest.json"), "utf8")).name;
-const mode = process.argv.includes("--smoke") ? "smoke" : "probe";
+const mode = process.argv.includes("--smoke") ? "smoke" : process.argv.includes("--first-run") ? "first-run" : "probe";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function installChrome() {
@@ -134,16 +138,31 @@ async function probe(sw) {
   return !failed;
 }
 
-// Serves one sample page (as /page.jpg inside a plain HTML page) and the mirrored model files (/models/<name>).
+// Synthetic pages for timing the first real detects (the benchmark page at different JPEG qualities: different bytes,
+// so none is served from the page cache). jpeg-js is a dev dependency of extension/.
+function syntheticPages() {
+  const jpeg = createRequire(join(EXTENSION, "package.json"))("jpeg-js");
+  const page = makeBenchmarkPage();
+  const rgba = { data: Buffer.from(page.data.buffer), width: page.width, height: page.height };
+  const qualities = { "cold-a": 90, "cold-b": 85, "warm-a": 80, "warm-b": 75 }; // fresh bytes for each start
+  return Object.fromEntries(Object.entries(qualities).map(([name, q]) => [`/synthetic-${name}.jpg`, jpeg.encode(rgba, q).data]));
+}
+
+// Serves one sample page (as /page.jpg inside a plain HTML page; none when image is null), the synthetic pages and
+// the mirrored model files (/models/<name>).
 function startServer(image) {
+  const synthetic = syntheticPages();
   const server = createServer((req, res) => {
     const path = decodeURIComponent(req.url.split("?")[0]);
-    if (path === "/") {
+    if (image && path === "/") {
       res.setHeader("Content-Type", "text/html");
       res.end('<!doctype html><body style="margin:0"><img src="/page.jpg" style="width:900px">');
-    } else if (path === "/page.jpg") {
+    } else if (image && path === "/page.jpg") {
       res.setHeader("Content-Type", "image/jpeg");
       createReadStream(image).pipe(res);
+    } else if (synthetic[path]) {
+      res.setHeader("Content-Type", "image/jpeg");
+      res.end(synthetic[path]);
     } else if (path.startsWith("/models/") && !path.includes("..") && existsSync(join(MIRROR, path.slice(8)))) {
       const file = join(MIRROR, path.slice(8));
       res.setHeader("Content-Length", statSync(file).size);
@@ -272,6 +291,101 @@ async function panelCheck(sw, ref) {
   }
 }
 
+const mb = (bytes) => `${(bytes / 1e6).toFixed(1)} MB`;
+const secs = (ms) => `${(ms / 1000).toFixed(1)} s`;
+
+// A fresh profile is an install: background.js opens the welcome tab and starts the engine at once, before the
+// harness could point it at the local mirror. Check the tab, then stop that engine and drop what it cached, so
+// the timed start below uses the mirror only.
+async function restartAfterInstall(sw) {
+  const targets = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
+  const welcome = targets.some((t) => t.type === "page" && t.url.endsWith("/welcome/welcome.html"));
+  console.log(`  welcome tab opened on install: ${welcome ? "yes" : "NO"}`);
+  await sw.evaluate("chrome.offscreen.closeDocument().catch(() => {})");
+  await sw.evaluate('caches.delete("anki-manga-models")');
+  await sw.evaluate('chrome.storage.session.remove("modelStatus")');
+  return welcome;
+}
+
+// Creates the offscreen document and waits for modelStatus to settle; prints each status change on the way.
+async function bootEngine(sw) {
+  const t0 = Date.now();
+  let lastLine = "";
+  await waitFor(() => sw.evaluate('typeof ensureOffscreen === "function"'), "background.js to load");
+  await sw.evaluate("ensureOffscreen()");
+  const status = await waitFor(async () => {
+    const s = await sw.evaluate('chrome.storage.session.get("modelStatus").then((r) => r.modelStatus || null)');
+    const bytes = s && s.totalBytes ? ` ${mb(s.receivedBytes)}/${mb(s.totalBytes)}${s.etaSec != null ? ` eta ${Math.round(s.etaSec)}s` : ""}` : "";
+    const line = s && `${s.state} ${Math.round((s.progress || 0) * 100)}%${bytes}${s.ep ? ` ep=${s.ep}` : ""}${s.firstRun ? " firstRun" : ""}`;
+    if (line !== lastLine) console.log(`  ${((Date.now() - t0) / 1000).toFixed(0)}s model status: ${(lastLine = line)}`);
+    return s && (s.state === "ready" || s.state === "error") ? s : null; // waitFor swallows exceptions
+  }, "the engine to become ready", 600000);
+  if (status.state === "error") throw new Error(`engine failed to start: ${status.error}`);
+  console.log(`engine ready in ${((Date.now() - t0) / 1000).toFixed(1)}s  ep=${status.ep} mode=${status.mode}`);
+  return status;
+}
+
+// Stage names in start-up order (chrome.storage hands the keys back sorted, so the order is restored here).
+const STAGE_ORDER = ["files", "probe", "create", "ready", "warmup", "benchmark", "total"];
+const stagesOf = (timings) =>
+  Object.keys(timings || {})
+    .filter((k) => k !== "files")
+    .sort((a, b) => STAGE_ORDER.indexOf(a.split("_")[0]) - STAGE_ORDER.indexOf(b.split("_")[0]) || a.localeCompare(b));
+
+// The stage breakdown the engine reports with "ready" (engine/startup.js): stages, then one row per file.
+function printTimings(status) {
+  const t = status.timings;
+  if (!t) return console.log("  (no timings in modelStatus)");
+  for (const stage of stagesOf(t)) console.log(`  ${stage.padEnd(18)} ${secs(t[stage]).padStart(8)}`);
+  for (const f of t.files) {
+    const parts = f.source === "cache" ? `read ${secs(f.readMs)}, hash ${secs(f.hashMs)}` : `download ${secs(f.downloadMs)}, hash ${secs(f.hashMs)}, cache write ${secs(f.putMs)}`;
+    console.log(`  ${f.source.padEnd(7)} ${f.name.padEnd(34)} ${mb(f.bytes).padStart(9)}  ${parts}`);
+  }
+}
+
+// Cold start (empty profile, models from the local mirror) and warm start (same profile after a browser restart).
+// Network time from the real model host is not part of this: the mirror is on 127.0.0.1.
+async function firstRun(launch) {
+  const server = await startServer(null);
+  try {
+    const runs = [];
+    let ok = true;
+    for (const kind of ["cold", "warm"]) {
+      const { sw, stop } = await launch();
+      try {
+        await waitFor(() => sw.evaluate('typeof handlers === "object"'), "background.js to load");
+        await sw.evaluate(`chrome.storage.local.set({devModelBase: ${JSON.stringify(`http://127.0.0.1:${SERVE_PORT}/models/`)}})`);
+        console.log(`--- ${kind} start`);
+        if (kind === "cold" && !(await restartAfterInstall(sw))) ok = false;
+        await bootEngine(sw);
+        // "ready" comes before the warm-up: how long does a page asked for right then take, and the next one?
+        const origin = `http://127.0.0.1:${SERVE_PORT}`;
+        await sw.evaluate(`handlers["am:enable-site"]({origin: ${JSON.stringify(origin)}}, {})`);
+        for (const name of ["a", "b"]) {
+          const t = Date.now();
+          const r = await sw.evaluate(`engineCall(${JSON.stringify({ type: "eng:page", source: { url: `${origin}/synthetic-${kind}-${name}.jpg` }, ocr: "none" })})`);
+          console.log(`  ${name === "a" ? "first" : "second"} page after ready: ${secs(Date.now() - t)} (${r.ok ? `${r.page.bubbles.length} bubbles` : r.error})`);
+        }
+        const status = await waitFor(async () => {
+          const s = await sw.evaluate('chrome.storage.session.get("modelStatus").then((r) => r.modelStatus || null)');
+          return s && s.timings && s.timings.total != null ? s : null;
+        }, "the engine to settle", 120000);
+        console.log(`  settled: ep=${status.ep} mode=${status.mode}`);
+        printTimings(status);
+        runs.push([kind, status]);
+      } finally {
+        await stop();
+      }
+    }
+    const stages = stagesOf(Object.assign({}, ...runs.map(([, s]) => s.timings)));
+    console.log(`\n| stage | ${runs.map(([k, s]) => `${k} (${s.ep})`).join(" | ")} |\n|---|${runs.map(() => "---:|").join("")}`);
+    for (const stage of stages) console.log(`| ${stage} | ${runs.map(([, s]) => (s.timings?.[stage] != null ? secs(s.timings[stage]) : "—")).join(" | ")} |`);
+    return ok && runs.every(([, s]) => s.state === "ready");
+  } finally {
+    server.close();
+  }
+}
+
 async function smoke(sw) {
   const samples = process.env.ANKI_MANGA_SAMPLES;
   if (!samples) throw new Error("set ANKI_MANGA_SAMPLES to the folder with the sample pages and reference/*.json");
@@ -285,22 +399,14 @@ async function smoke(sw) {
   try {
     await waitFor(() => sw.evaluate('typeof handlers === "object"'), "background.js to load");
     await sw.evaluate(`chrome.storage.local.set({devModelBase: ${JSON.stringify(`${origin}/models/`)}})`);
+    await restartAfterInstall(sw);
     // Force prefetch: the benchmark may pick on-demand OCR (e.g. software WebGPU in headless Chrome).
     await sw.evaluate('chrome.storage.local.set({settings: {perfMode: "prefetch"}})');
     await sw.evaluate(`handlers["am:enable-site"]({origin: ${JSON.stringify(origin)}}, {})`);
 
     // Content scripts do not retry "models_*" yet, so wait until the engine is ready before opening the page.
-    const t0 = Date.now();
-    let lastLine = "";
-    await sw.evaluate("ensureOffscreen()");
-    const status = await waitFor(async () => {
-      const s = await sw.evaluate('chrome.storage.session.get("modelStatus").then((r) => r.modelStatus || null)');
-      const line = s && `${s.state} ${Math.round((s.progress || 0) * 100)}%${s.ep ? ` ep=${s.ep}` : ""}`;
-      if (line !== lastLine) console.log(`  ${((Date.now() - t0) / 1000).toFixed(0)}s model status: ${(lastLine = line)}`);
-      return s && (s.state === "ready" || s.state === "error") ? s : null; // waitFor swallows exceptions
-    }, "the engine to become ready", 300000);
-    if (status.state === "error") throw new Error(`engine failed to start: ${status.error}`);
-    console.log(`engine ready in ${((Date.now() - t0) / 1000).toFixed(1)}s  ep=${status.ep} mode=${status.mode}`);
+    const status = await bootEngine(sw);
+    printTimings(status);
 
     const created = await (await fetch(`http://127.0.0.1:${PORT}/json/new?${origin}/`, { method: "PUT" })).json();
     tab = await Cdp.open(created.webSocketDebuggerUrl);
@@ -361,9 +467,8 @@ async function smoke(sw) {
   }
 }
 
-async function main() {
-  const chromePath = installChrome();
-  const profile = mkdtempSync(join(tmpdir(), "anki-manga-e2e-"));
+// Starts Chrome for Testing with the unpacked extension on `profile`; stop() leaves the profile in place.
+async function launchChrome(chromePath, profile) {
   const chrome = spawn(
     chromePath,
     [
@@ -380,14 +485,35 @@ async function main() {
     ],
     { stdio: "ignore" },
   );
+  const exited = new Promise((r) => chrome.once("exit", r));
+  const stop = async () => {
+    sw?.close();
+    chrome.kill();
+    await Promise.race([exited, sleep(5000)]);
+  };
   let sw;
   try {
     sw = await connectServiceWorker();
-    if (mode === "smoke") return (await smoke(sw)) ? 0 : 1;
-    return (await probe(sw)) ? 0 : 1;
+  } catch (e) {
+    await stop();
+    throw e;
+  }
+  return { sw, stop };
+}
+
+async function main() {
+  const chromePath = installChrome();
+  const profile = mkdtempSync(join(tmpdir(), "anki-manga-e2e-"));
+  try {
+    if (mode === "first-run") return (await firstRun(() => launchChrome(chromePath, profile))) ? 0 : 1;
+    const { sw, stop } = await launchChrome(chromePath, profile);
+    try {
+      if (mode === "smoke") return (await smoke(sw)) ? 0 : 1;
+      return (await probe(sw)) ? 0 : 1;
+    } finally {
+      await stop();
+    }
   } finally {
-    sw?.close();
-    chrome.kill();
     await sleep(300);
     rmSync(profile, { recursive: true, force: true });
   }

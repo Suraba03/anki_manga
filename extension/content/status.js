@@ -17,7 +17,18 @@
     models_loading: "loading models…",
   };
 
-  // state: null | {phase: "detecting"} | {phase: "ocr", done, total} | {phase: "error", error}
+  // models: the engine's {receivedBytes, totalBytes, firstRun} sent with a models_* reply (engine/busy.js); absent
+  // from an older engine. Short: the badge is small.
+  function modelsText(error, models) {
+    if (!models) return BUSY_ERRORS[error];
+    if (error === "models_downloading" && models.totalBytes > 0) {
+      const mb = (b) => Math.round(b / 1e6);
+      return `models ${mb(models.receivedBytes)}/${mb(models.totalBytes)} MB`;
+    }
+    return error === "models_loading" && models.firstRun ? "preparing models…" : "starting OCR…";
+  }
+
+  // state: null | {phase: "detecting"} | {phase: "ocr", done, total} | {phase: "error", error, models?}
   function badge(state) {
     if (!state) return null;
     if (state.phase === "detecting") return { text: "⏳ finding bubbles…", kind: "busy" };
@@ -27,7 +38,7 @@
       return { text: `✓ ${state.total}`, kind: "done" };
     }
     if (IGNORED.has(state.error)) return null;
-    if (BUSY_ERRORS[state.error]) return { text: `⏳ ${BUSY_ERRORS[state.error]}`, kind: "busy" };
+    if (BUSY_ERRORS[state.error]) return { text: `⏳ ${modelsText(state.error, state.models)}`, kind: "busy" };
     return { text: `⚠ ${ERRORS[state.error] || state.error || "something went wrong"}`, kind: "error" };
   }
 

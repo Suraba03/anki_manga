@@ -206,7 +206,7 @@
       return;
     }
     const error = res && res.error;
-    setState(img, { phase: "error", error });
+    setState(img, { phase: "error", error, models: res && res.models });
     if (RETRYABLE.has(error)) {
       byImg.delete(img);
       retryLater(img, attempt, RETRY_DELAYS[attempt] ?? RETRY_LATER);
@@ -496,7 +496,7 @@
       if (!byImg.get(el) || !byImg.get(el).handle) showPage(el, key, res.page);
       return;
     }
-    setState(el, { phase: "error", error: res && res.error });
+    setState(el, { phase: "error", error: res && res.error, models: res && res.models });
     if (res && RETRYABLE.has(res.error)) {
       captured.delete(el);
       setTimeout(() => queueCapture(el), RETRY_LATER);
@@ -541,7 +541,7 @@
       blockCapture(el);
       return;
     }
-    setState(target, { phase: "error", error: res && res.error });
+    setState(target, { phase: "error", error: res && res.error, models: res && res.models });
     sliceError.set(el, target);
     if (res && RETRYABLE.has(res.error)) setTimeout(tryCaptures, RETRY_LATER);
     else {
