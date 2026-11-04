@@ -51,7 +51,7 @@ There is nothing else to install: no helper program, no Python, no Terminal. Tex
 
 Install **Manga OCR & Mining for Anki** from the [Chrome Web Store](https://chromewebstore.google.com/detail/bgfnpifeeclmpfdcahphaiahgafjppeo), then click the puzzle-piece icon in the toolbar and **pin** it so its icon is always visible.
 
-> The Store listing is not published yet. Until then, load the extension from source (see [Development](#development)): download the repository, open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and choose the `extension` folder.
+> To run the latest code instead, load the extension from source (see [Development](#development)): download the repository, open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and choose the `extension` folder.
 
 ---
 
