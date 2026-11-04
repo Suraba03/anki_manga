@@ -19,7 +19,7 @@ messages or PRs.
 |---|---|
 | open | the page loads (after following the `follow` link, if any) |
 | found | the extension put an overlay on at least one page |
-| bubbles | a bubble with recognised text is in the window (the first one is scrolled to if the reader starts below the fold) |
+| bubbles | a bubble with recognised text is in the window (the first one is scrolled to if the reader starts below the fold; with none anywhere, the page is turned up to 3 times, for a reader that opens on the cover) |
 | text | a mouse click on the bubble shows its text in the side panel (up to `--clicks`, default 3) |
 | furigana | lines with kanji have readings (– when no clicked line had kanji) |
 | explanation | the panel shows an explanation (see "Explanations" below) |

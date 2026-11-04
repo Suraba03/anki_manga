@@ -396,20 +396,30 @@ async function runSite(site, ctx, res) {
   // 3. a bubble with text in view (the first one with text is scrolled to, as a reader would: the first page of a
   //    long strip can sit below a header or a cover)
   let inView = [];
+  let turns = 0;
+  let lastTurn = Date.now();
   try {
     await waitFor(async () => {
       inView = await tab.evaluate(BUBBLES_IN_VIEW);
       if (inView.length && res.timings.firstBubbleMs == null) res.timings.firstBubbleMs = Date.now() - t0;
       if (inView.some((b) => b.read)) return true;
-      // Nothing at all in view after a while: go to the first bubble with text (the reader may start below the fold).
-      if (!inView.length && Date.now() - t0 > 20000) await tab.evaluate(`document.querySelector(".am-bubble:not(.am-pending)")?.scrollIntoView({ block: "center" })`);
+      // Nothing in view after a while: go to the first bubble with text (the reader may start below the fold), or,
+      // with none anywhere, turn the page (a reader that opens on the cover), up to 3 times, 15 s apart.
+      if (!inView.length && Date.now() - t0 > 20000) {
+        const jumped = await tab.evaluate(`(() => { const b = document.querySelector(".am-bubble:not(.am-pending)"); b?.scrollIntoView({ block: "center" }); return !!b; })()`);
+        if (!jumped && turns < 3 && Date.now() - lastTurn > 15000) {
+          turns++;
+          lastTurn = Date.now();
+          for (const type of ["keyDown", "keyUp"]) await tab.send("Input.dispatchKeyEvent", { type, key: "ArrowLeft", code: "ArrowLeft", windowsVirtualKeyCode: 37 });
+        }
+      }
       return false;
     }, "a bubble with text in view", 75000);
     res.timings.firstTextMs = Date.now() - t0;
     steps.bubbles = { ok: true };
   } catch {
     const all = await tab.evaluate(PAGE_FACTS).catch(() => null);
-    steps.bubbles = { ok: false, note: all?.bubbles ? `${all.bubbles} bubbles, none with text after 75 s` : "no bubble" };
+    steps.bubbles = { ok: false, note: (all?.bubbles ? `${all.bubbles} bubbles, none with text after 75 s` : "no bubble") + (turns ? ` (${turns} page turn(s) tried)` : "") };
   }
   const panelState = async () => {
     const ss = await ctx.sw.evaluate('chrome.storage.session.get(["missingHosts", "captureBlocked"])');
