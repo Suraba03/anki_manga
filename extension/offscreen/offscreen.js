@@ -50,13 +50,16 @@ async function probeAnki() {
 const MODEL_CACHE = "anki-manga-models";
 const MIN_SIDE = 400;
 const MIN_LONG_SIDE = 600;
-const PREPARE_WAIT_MS = 10000; // a page request waits this long for the warm-up before it is told to retry
+// A page request waits this long for the warm-up and speed check before it is told to retry (models_loading). Its
+// badge reads "finding bubbles…" meanwhile, as before the gate; WebGPU settles in ~2-3 s, and a shorter wait would
+// hand slow WASM machines to the content script's retry timers (up to 15 s), so 10 s is the trade-off.
+const PREPARE_WAIT_MS = 10000;
 const PAGES_IN_MEMORY = 6; // decoded pages kept for on-demand OCR (about 7 MB each)
 
 let status = { state: "downloading", progress: 0 };
 let persistedProgress = -1;
 let engine = null;
-let preparing = null; // resolves to `prepared` (or null) when the engine's background work is done
+let preparing = null; // settles when the engine's background work (warm-up, speed check) is done; callers re-check the gate
 let prepared = null; // the benchmark once the engine's warm-up and speed check are done (pages wait for it)
 let store = null;
 let booting = null;
