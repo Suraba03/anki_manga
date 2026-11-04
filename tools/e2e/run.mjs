@@ -276,6 +276,14 @@ async function panelCheck(sw, ref) {
     await panel.evaluate('document.querySelector(".entry .tok").click()');
     await waitFor(async () => (await panel.evaluate('document.querySelectorAll(".entry .dict-entry").length')) > 0, "the dictionary entry", 20000);
     console.log(`panel dictionary: ${(await text(".entry .dict-entry")).replace(/\s+/g, " ").slice(0, 120)}`);
+    // No deck is picked silently: with none chosen, "+" asks for one; "Use “manga mining”" in Settings confirms the
+    // preselected deck, and the line above the entries names it.
+    await panel.evaluate('document.querySelector(".entry .dict-entry button").click()');
+    await waitFor(async () => (await text(".entry .msg")).includes("Pick an Anki deck in Settings first."), "the pick-a-deck message", 20000);
+    await waitFor(() => panel.evaluate('!document.getElementById("deck-use").hidden'), "the Use-deck button", 20000);
+    await panel.evaluate('document.getElementById("deck-use").click()');
+    await waitFor(async () => (await text("#deck-target")) === "Cards go to → manga mining", "the deck line", 20000);
+    console.log(`panel deck: ${await text("#deck-target")}`);
     await panel.evaluate('document.querySelector(".entry .dict-entry button").click()');
     await waitFor(async () => (await panel.evaluate('document.querySelector(".entry .dict-entry button").textContent')) === "✓ added", "the card to be added", 20000);
     const note = anki.notes[0];

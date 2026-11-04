@@ -1,7 +1,7 @@
 // The settings drawer: deck, explanation source (free / own key), text-recognition mode, delete data.
 import { getSettings, setSettings } from "../lib/settings.js";
-import { freeLeftText, ankiErrorMessage, ownKeyCheck, llmModeAfter, validateBaseUrl } from "./logic.js";
-import { deckNames, forgetKnown } from "./anki.js";
+import { freeLeftText, ankiErrorMessage, ownKeyCheck, llmModeAfter, validateBaseUrl, deckChoice, deckTargetText, DEFAULT_DECK } from "./logic.js";
+import { deckNames, createDeck, forgetKnown } from "./anki.js";
 import { engine } from "./engine.js";
 import { state } from "./state.js";
 
@@ -20,20 +20,52 @@ async function saveDeck(deck) {
   await chrome.storage.local.set({ decks });
 }
 
+// A saved deck that Anki no longer has: forgotten (for this site and as the last one), so "+" asks for a choice.
+async function forgetDeck(deck) {
+  const decks = (await chrome.storage.local.get("decks")).decks || {};
+  for (const key of Object.keys(decks)) if (decks[key] === deck) delete decks[key];
+  await chrome.storage.local.set({ decks });
+}
+
+// The line above the entries: where cards go, or that a deck must be picked first.
+export async function showDeckTarget() {
+  const deck = await currentDeck();
+  $("deck-target").textContent = deckTargetText(deck);
+  $("deck-target").classList.toggle("none", !deck);
+}
+
+async function chooseDeck(deck) {
+  await saveDeck(deck);
+  forgetKnown(deck);
+  await loadDecks();
+}
+
 // userAction: true from the "Connect to Anki" button; events (tab changes) never re-ask after a denial.
+// Nothing is saved here: see deckChoice. A deck is saved only when the user picks one, confirms or creates it.
 export async function loadDecks({ userAction = false } = {}) {
   const select = $("deck");
   try {
     const names = await deckNames({ userAction });
     $("anki-connect").hidden = true;
-    const chosen = (await currentDeck()) || (names.includes("manga mining") ? "manga mining" : names[0]);
-    select.replaceChildren(...names.map((d) => new Option(d, d, false, d === chosen)));
-    $("deck-state").textContent = "";
-    if (chosen) await saveDeck(chosen);
+    const saved = await currentDeck();
+    const choice = deckChoice(names, saved);
+    if (choice.missing) await forgetDeck(choice.missing);
+    const options = names.map((d) => new Option(d, d, false, d === choice.selected));
+    if (!choice.selected) options.unshift(Object.assign(new Option("Choose a deck…", "", true, true), { disabled: true }));
+    select.replaceChildren(...options);
+    $("deck-use").hidden = choice.offer !== "use";
+    $("deck-use").textContent = `Use “${choice.selected}”`;
+    $("deck-create").hidden = choice.offer !== "create";
+    const gone = choice.missing ? `“${choice.missing}” is no longer in Anki. ` : "";
+    $("deck-state").textContent =
+      choice.offer === "use" ? `${gone}Cards will go to “${DEFAULT_DECK}” once you confirm it.`
+      : choice.offer === "create" ? `${gone}Choose a deck for your cards, or create “${DEFAULT_DECK}”.`
+      : "";
   } catch (e) {
     $("deck-state").textContent = ankiErrorMessage(e.kind || "anki_error", e.kind ? "" : e.message);
     $("anki-connect").hidden = false;
   }
+  await showDeckTarget();
 }
 
 // --- explanations: free or own key ----------------------------------------------------
@@ -101,8 +133,23 @@ export async function openOwnKey() {
 
 export async function initSettings() {
   $("deck").addEventListener("change", () => {
-    saveDeck($("deck").value);
-    forgetKnown($("deck").value);
+    if ($("deck").value) chooseDeck($("deck").value);
+  });
+  $("deck-use").addEventListener("click", () => chooseDeck(DEFAULT_DECK));
+  $("deck-create").addEventListener("click", async () => {
+    $("deck-create").disabled = true;
+    try {
+      await createDeck(DEFAULT_DECK);
+      await chooseDeck(DEFAULT_DECK);
+    } catch (e) {
+      $("deck-state").textContent = ankiErrorMessage(e.kind || "anki_error", e.kind ? "" : e.message);
+    } finally {
+      $("deck-create").disabled = false;
+    }
+  });
+  $("deck-target").addEventListener("click", () => {
+    $("settings").open = true;
+    $("deck").focus();
   });
   for (const radio of document.querySelectorAll('input[name="llm-mode"]')) {
     radio.addEventListener("change", async () => {

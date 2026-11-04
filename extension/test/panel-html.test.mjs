@@ -28,3 +28,9 @@ test("an added card is green at full opacity, not greyed like a disabled button"
     assert.doesNotMatch(rules(row + " ") + rules(row + "{"), /opacity/, `${row} is not faded`);
   }
 });
+
+test("deck: Settings has buttons to confirm or create the deck; the line naming it sits right above the entries", () => {
+  assert.match(html, /<button id="deck-use" class="btn" type="button" hidden>/);
+  assert.match(html, /<button id="deck-create" class="btn" type="button" hidden>Create “manga mining”<\/button>/);
+  assert.match(html, /<p id="deck-target" class="deck-target"[^>]*><\/p>\s*<main id="entries">/);
+});

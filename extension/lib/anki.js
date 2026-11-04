@@ -103,6 +103,10 @@ export class AnkiClient {
     return this._call("requestPermission", {}, this._permissionTimeoutMs);
   }
 
+  createDeck(deck) {
+    return this._call("createDeck", { deck });
+  }
+
   async deckNames() {
     return (await this._call("deckNames")).slice().sort();
   }

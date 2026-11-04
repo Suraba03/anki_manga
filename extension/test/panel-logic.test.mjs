@@ -13,6 +13,10 @@ import {
   validateBaseUrl,
   freeRemainingAfterError,
   cardDoneState,
+  deckChoice,
+  deckTargetText,
+  DEFAULT_DECK,
+  NO_DECK,
 } from "../panel/logic.js";
 
 test("free-tier and no_text copy is exact", () => {
@@ -190,4 +194,29 @@ test("a declined line: neutral message, no retry, and the free counter is left a
   assert.equal(free.text, `${own.text} It did not count toward your free limit.`);
   assert.equal(explainErrorMessage("free_daily_limit", { free: true }).text, explainErrorMessage("free_daily_limit").text, "other codes ignore the mode");
   assert.equal(freeRemainingAfterError("refused"), null);
+});
+
+test("deck: a saved deck that Anki still has is used as it is", () => {
+  assert.deepEqual(deckChoice(["Default", "Japanese", "manga mining"], "Japanese"), { selected: "Japanese", saved: true, offer: null, missing: null });
+});
+
+test("deck: nothing saved and 'manga mining' exists: preselected, but only saved once the user confirms", () => {
+  assert.equal(DEFAULT_DECK, "manga mining");
+  assert.deepEqual(deckChoice(["Default", "manga mining"], null), { selected: "manga mining", saved: false, offer: "use", missing: null });
+});
+
+test("deck: nothing saved and no 'manga mining': nothing is selected (never the first deck); creating it is offered", () => {
+  assert.deepEqual(deckChoice(["Default", "Japanese"], null), { selected: null, saved: false, offer: "create", missing: null });
+  assert.deepEqual(deckChoice([], null), { selected: null, saved: false, offer: "create", missing: null });
+});
+
+test("deck: a saved deck that is gone from Anki is reported, and the choice starts over", () => {
+  assert.deepEqual(deckChoice(["Default", "manga mining"], "Old deck"), { selected: "manga mining", saved: false, offer: "use", missing: "Old deck" });
+  assert.deepEqual(deckChoice(["Default"], "Old deck"), { selected: null, saved: false, offer: "create", missing: "Old deck" });
+});
+
+test("deck: the line by the cards names the target deck, or says to pick one", () => {
+  assert.equal(deckTargetText("manga mining"), "Cards go to → manga mining");
+  assert.equal(deckTargetText(null), NO_DECK);
+  assert.equal(NO_DECK, "Pick an Anki deck in Settings first.");
 });

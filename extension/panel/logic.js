@@ -87,6 +87,20 @@ export const cardDoneState = (outcome) => (outcome === "added" ? { label: "✓ a
 
 export const NO_DECK = "Pick an Anki deck in Settings first.";
 
+// The deck cards go to is the user's choice, never a guess: a saved deck is used while Anki still has it; otherwise
+// nothing is saved until the user confirms "manga mining" (preselected when it exists), picks a deck, or creates
+// "manga mining". -> {selected, saved, offer: "use" | "create" | null, missing: the saved deck Anki no longer has}
+export const DEFAULT_DECK = "manga mining";
+export function deckChoice(names, saved) {
+  if (saved && names.includes(saved)) return { selected: saved, saved: true, offer: null, missing: null };
+  const missing = saved || null;
+  if (names.includes(DEFAULT_DECK)) return { selected: DEFAULT_DECK, saved: false, offer: "use", missing };
+  return { selected: null, saved: false, offer: "create", missing };
+}
+
+// The line above the entries, next to every "+": where a card goes.
+export const deckTargetText = (deck) => (deck ? `Cards go to → ${deck}` : NO_DECK);
+
 // --- own key -------------------------------------------------------------------------------
 const trimUrl = (u) => String(u || "").trim().replace(/\/+$/, "");
 // Provider plus base URL identify where a key belongs (the base URL only counts for "custom").

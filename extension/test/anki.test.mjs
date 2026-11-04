@@ -40,6 +40,12 @@ test("ensureNoteType is a no-op when present", async () => {
   assert.ok(!sent.some((s) => s.body.action === "createModel"));
 });
 
+test("createDeck asks AnkiConnect to create the named deck", async () => {
+  const { sent, c } = client(() => json(ok(1651445861967)));
+  await c.createDeck("manga mining");
+  assert.deepEqual(sent.map((s) => [s.body.action, s.body.params]), [["createDeck", { deck: "manga mining" }]]);
+});
+
 test("deckNames returns sorted names", async () => {
   const { c } = client(() => json(ok(["b", "a", "Default"])));
   assert.deepEqual(await c.deckNames(), ["Default", "a", "b"]);

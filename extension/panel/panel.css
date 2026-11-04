@@ -49,6 +49,9 @@ body {
 }
 .btn:disabled { opacity: .5; cursor: default; }
 .page-status { margin: -4px 14px 8px; font-size: 12px; color: var(--muted); }
+.deck-target { margin: 0 14px 8px; font-size: 12px; color: var(--muted); cursor: pointer; }
+.deck-target:empty { display: none; }
+.deck-target.none { color: var(--warn); }
 #host-requests .btn { margin: 0 14px 8px; }
 main { padding: 0 14px 14px; }
 .empty { color: var(--muted); }
