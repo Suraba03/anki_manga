@@ -1,9 +1,10 @@
 // Turns the raw trace logs of one jump (content script, offscreen document, panel summary updates) into the numbers of
 // the reading-speed report. Pure functions: tested in extension/test/perf-analyze.test.mjs.
 //
-// Marks (see extension/content/main.js, extension/engine/{trace,runtime,scheduler}.js, extension/offscreen/offscreen.js):
+// Marks (see extension/content/main.js, extension/engine/{trace,rank-gate,scheduler}.js, extension/offscreen/offscreen.js):
 //   content:   observed, fetch:start, fetch:headers, fetch:data, send, reply, overlay, badge, text, report
-//   offscreen: page:begin/read/hashed/lookup/detect-call/detected/image/reply, (detect|ocr):queued/start/end (the runtime's serial queue),
+//   offscreen: page:begin/read/hashed/lookup/detect-call/detected/image/reply, queue:queued/start/end/dropped (the
+//              priority queues in front of the engine, jobs matched by id; kind read | detect | ocr),
 //              bubble:queued/start/end/sunk (the OCR scheduler's per-bubble jobs)
 // All timestamps are epoch milliseconds (performance.timeOrigin + performance.now()).
 
@@ -19,18 +20,18 @@ const first = (log, pred, from = -Infinity) => log.find((m) => m.t >= from && pr
 // A badge counts as ready when OCR is finished (also "no text").
 const badgeDone = (m) => m.phase === "ocr" && m.done >= m.total;
 
-// The runtime's serial queue as a list of jobs. One FIFO, so the i-th queued/start/end marks belong together.
-function runtimeJobs(offscreen) {
-  const of = (what) => offscreen.filter((m) => new RegExp(`^(detect|ocr):${what}$`).test(m.name));
-  const [starts, ends] = [of("start"), of("end")];
-  return of("queued").map((q, i) => ({
-    kind: q.name.split(":")[0],
-    queued: q.t,
-    ahead: q.ahead,
-    start: starts[i]?.t ?? null,
-    end: ends[i]?.t ?? null,
-    order: i,
-  }));
+// The priority queues in front of the engine (extension/engine/rank-gate.js) as a list of jobs, matched by id.
+function queueJobs(offscreen) {
+  const jobs = new Map();
+  for (const m of offscreen) {
+    if (!/^queue:/.test(m.name)) continue;
+    const job = jobs.get(m.id) || { id: m.id, kind: m.kind, queued: null, ahead: null, start: null, end: null, dropped: null, mark: null };
+    jobs.set(m.id, job);
+    const what = m.name.slice(6);
+    if (what === "queued") Object.assign(job, { queued: m.t, ahead: m.ahead, mark: m });
+    else job[what] = m.t;
+  }
+  return jobs;
 }
 
 // tScroll: when the jump started (marks are looked up from here); tArrive (a fling): when it stopped, which the
@@ -67,35 +68,47 @@ export function analyzeJump({ page, keyOf, tScroll, tArrive = tScroll, content, 
   const step = (name) => (rid != null ? first(offscreen, (m) => m.name === `page:${name}` && m.rid === rid) : null);
   const lookup = step("lookup");
   const detectCall = step("detect-call");
-  const jobs = runtimeJobs(offscreen);
-  const queuedLog = offscreen.filter((m) => /^(detect|ocr):queued$/.test(m.name));
-  const myIndexInLog = detectCall ? offscreen.indexOf(detectCall) : -1;
-  const myJob = detectCall ? jobs[queuedLog.indexOf(offscreen[myIndexInLog + 1])] : null;
-  const ridOfJob = (job) => {
-    const q = queuedLog[job.order];
-    const prev = offscreen[offscreen.indexOf(q) - 1];
-    return prev && prev.name === "page:detect-call" ? prev.rid : null;
+  const queue = queueJobs(offscreen);
+  // a job's queued mark comes right after the mark of the code that submitted it
+  const jobAfter = (m) => {
+    const next = m && offscreen[offscreen.indexOf(m) + 1];
+    return next && next.name === "queue:queued" ? queue.get(next.id) : null;
   };
+  const jobBefore = (job) => {
+    const prev = job.mark && offscreen[offscreen.indexOf(job.mark) - 1];
+    return prev || null;
+  };
+  const myJob = jobAfter(detectCall);
+  const myRead = jobAfter(begin);
   const keyOfRid = (r) => {
     const b = offscreen.find((m) => m.name === "page:begin" && m.rid === r);
-    const s = b && content.find((m) => m.name === "send" && m.len === b.len);
-    return s ? s.key : null;
+    const sent = b && content.find((m) => m.name === "send" && m.len === b.len);
+    return sent ? sent.key : null;
   };
-  const ahead = myJob ? jobs.filter((j) => j !== myJob && j.queued <= myJob.queued && (j.end == null || j.end > myJob.queued)) : [];
-  const detectAhead = ahead.filter((j) => j.kind === "detect");
+  // Jobs that ran while this one waited (they were running at its queued time, or started before its own start), and jobs
+  // that were queued before it but started after it (the priority queue let it overtake them).
+  const ranAhead = myJob && myJob.start != null
+    ? [...queue.values()].filter((j) => j !== myJob && j.start != null && j.start < myJob.start && (j.end == null || j.end > myJob.queued))
+    : [];
+  const detectAhead = ranAhead.filter((j) => j.kind === "detect");
+  const overtaken = myJob && myJob.start != null
+    ? [...queue.values()].filter((j) => j !== myJob && j.kind === "detect" && j.queued < myJob.queued && (j.start == null || j.start > myJob.start))
+    : [];
+  const pagesOf = (jobs) =>
+    jobs.map((j) => {
+      const prev = jobBefore(j);
+      return pageNumber(prev && prev.name === "page:detect-call" ? keyOfRid(prev.rid) : null);
+    });
 
   const detected = step("detected");
   const imageDone = step("image");
   const pageReply = step("reply");
 
-  // OCR of this page's bubbles. The scheduler queue (queued -> start) is told apart from the runtime's serial queue
-  // (the OCR job waits there behind detects) and the run itself; the runtime job follows bubble:start in the log.
+  // OCR of this page's bubbles: the wait in the OCR queue (queued -> start) and the run (start -> end)
   const ocr = overlay
     ? [...new Set(offscreen.filter((m) => m.name === "bubble:queued" && m.pageId === overlay.pageId).map((m) => m.bubbleId))].map((id) => {
         const f = (name) => first(offscreen, (m) => m.name === `bubble:${name}` && m.pageId === overlay.pageId && m.bubbleId === id);
-        const start = f("start");
-        const next = start && offscreen[offscreen.indexOf(start) + 1];
-        return { id, queued: f("queued"), start, end: f("end"), job: next && next.name === "ocr:queued" ? jobs[queuedLog.indexOf(next)] : null };
+        return { id, queued: f("queued"), start: f("start"), end: f("end") };
       })
     : [];
   const ocrRuns = ocr.map((o) => diff(o.start && o.start.t, o.end && o.end.t));
@@ -118,9 +131,16 @@ export function analyzeJump({ page, keyOf, tScroll, tArrive = tScroll, content, 
     };
   }
 
+  // the next two pages (prefetch still has to read them eventually)
+  const neighboursMs = [1, 2].map((k) => {
+    const b = first(content, (m) => m.name === "badge" && m.key === keyOf(page + k) && badgeDone(m), tScroll - 5);
+    return b ? diff(tArrive, b.t) : null;
+  });
+
   const cached = lookup ? lookup.cached : null;
   const detectMarks = myJob && !cached ? { queueWait: diff(myJob.queued, myJob.start), run: diff(myJob.start, myJob.end) } : { queueWait: null, run: null };
   const afterDetect = detectMarks.run != null && myJob.end != null ? myJob.end : null;
+  const dropped = myJob && myJob.dropped != null;
   return {
     page,
     key,
@@ -133,15 +153,19 @@ export function analyzeJump({ page, keyOf, tScroll, tArrive = tScroll, content, 
     allTextsMs: diff(tArrive, allTexts),
     inFlightAtSend,
     detectsAhead: myJob ? detectAhead.length : null,
-    ocrAhead: myJob ? ahead.length - detectAhead.length : null,
-    detectAheadPages: myJob ? detectAhead.map((j) => pageNumber(keyOfRid(ridOfJob(j)))) : null,
+    ocrAhead: myJob ? ranAhead.length - detectAhead.length : null,
+    detectAheadPages: myJob ? pagesOf(detectAhead) : null,
+    detectsOvertaken: myJob ? overtaken.length : null,
+    dropped,
+    neighboursMs,
     breakdown: {
       scrollToObserved: diff(tArrive, observed && observed.t),
       observedToFetch: diff(observed && observed.t, fetchStart && fetchStart.t),
       fetch: diff(fetchStart && fetchStart.t, fetchHeaders && fetchHeaders.t),
       toDataUrl: diff(fetchHeaders && fetchHeaders.t, fetchData && fetchData.t),
       workerHop: diff(send && send.t, begin && begin.t),
-      read: diff(begin && begin.t, step("read") && step("read").t),
+      readQueueWait: myRead ? diff(myRead.queued, myRead.start) : null,
+      read: diff(myRead && myRead.start != null ? myRead.start : begin && begin.t, step("read") && step("read").t),
       hash: diff(step("read") && step("read").t, step("hashed") && step("hashed").t),
       lookup: diff(step("hashed") && step("hashed").t, lookup && lookup.t),
       detectQueueWait: detectMarks.queueWait,
@@ -152,9 +176,7 @@ export function analyzeJump({ page, keyOf, tScroll, tArrive = tScroll, content, 
       layout: diff(reply && reply.t, overlay && overlay.t),
       ocrQueueWaitFirst: ocr[0] ? diff(ocr[0].queued && ocr[0].queued.t, ocr[0].start && ocr[0].start.t) : null,
       ocrFirstBubble: ocrRuns.length ? ocrRuns[0] : null,
-      ocrRuntimeWaitFirst: ocr[0] && ocr[0].job ? diff(ocr[0].job.queued, ocr[0].job.start) : null,
       ocrMsPerBubble: ocrRuns,
-      ocrRunMsPerBubble: ocr.map((o) => (o.job ? diff(o.job.start, o.job.end) : null)),
     },
     badge,
   };

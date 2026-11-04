@@ -8,6 +8,7 @@ import { busyReply } from "../engine/busy.js";
 import { pageGate, resolveScope, retireEngine, waitPrepared } from "../engine/gate.js";
 import { openStore } from "../engine/store.js";
 import { OcrScheduler } from "../engine/scheduler.js";
+import { readingQueues } from "../engine/priority.js";
 import { begin } from "../engine/trace.js";
 import { createTokenizer } from "../lib/tokenizer.js";
 import { bubbleReply } from "../engine/bubble.js";
@@ -97,7 +98,8 @@ async function onText(pageId, bubbleId, text, persist) {
   if (persist) await store.setText(pageId, bubbleId, text);
   toWorker({ type: "eng:text", pageId, bubbleId, text });
 }
-const scheduler = new OcrScheduler((rgba, bubble) => engine.ocr(rgba, bubble), onText);
+const queues = readingQueues(); // priority queues in front of the engine: reads, then detect and OCR
+const scheduler = new OcrScheduler((rgba, bubble) => engine.ocr(rgba, bubble), onText, { slot: queues.slot, pageRank: queues.pageRank });
 
 let manifestLoad = null;
 function loadManifest() {
@@ -208,6 +210,7 @@ async function rgbaFor(pageId) {
 
 async function enginePage(msg) {
   const step = begin("page", { len: msg.source?.dataUrl?.length }); // timing marks, only for tools/perf
+  const req = queues.request(msg);
   if (status.state === "error") {
     const err = status.error;
     boot(); // every page request after a failure tries again
@@ -224,7 +227,7 @@ async function enginePage(msg) {
 
   let img;
   try {
-    img = await readSource(msg.source);
+    img = await queues.reads.submit("read", () => readSource(msg.source), req);
   } catch (e) {
     if (e.code) return { ok: false, error: e.code };
     throw e;
@@ -236,14 +239,23 @@ async function enginePage(msg) {
   }
   const pageId = await store.pageIdFor(bytes);
   step("hashed", { pageId });
+  queues.bind(pageId, msg.key);
+  const ocrAll = resolveScope(msg.ocr, mode) === "all";
+  let enqueued = false;
   let page = await store.getPage(pageId);
   step("lookup", { cached: !!page });
   if (!page) {
     try {
       step("detect-call");
-      await store.savePage(pageId, rgba.width, rgba.height, await engine.detect(rgba));
+      const found = await queues.compute.submit("detect", () => engine.detect(rgba), req);
+      if (ocrAll) {
+        scheduler.enqueuePage(pageId, rgba, found); // before the store writes: the queue's next pick must see these bubbles
+        enqueued = true;
+      }
+      await store.savePage(pageId, rgba.width, rgba.height, found);
       step("detected");
     } catch (e) {
+      if (e.code === "deferred") return { ok: false, error: "deferred" }; // the page left the zone while it waited
       console.error("detect failed", e);
       return { ok: false, error: "engine_error" };
     }
@@ -252,7 +264,7 @@ async function enginePage(msg) {
   if (!(await store.loadImage(pageId))) await store.saveImage(pageId, bytes);
   step("image");
   remember(pageId, rgba);
-  if (resolveScope(msg.ocr, mode) === "all") scheduler.enqueuePage(pageId, rgba, page.bubbles);
+  if (ocrAll && !enqueued) scheduler.enqueuePage(pageId, rgba, page.bubbles);
   step("reply");
   return { ok: true, page: { page_id: pageId, width: page.width, height: page.height, bubbles: page.bubbles } };
 }
@@ -377,6 +389,7 @@ async function engineTexts({ pageId }) {
 
 const common = {
   "eng:page": enginePage,
+  "eng:priorities": async ({ items }) => (queues.update(items), { ok: true }),
   "eng:prioritize": enginePrioritize,
   "eng:texts": engineTexts,
   "eng:bubble": engineBubble,

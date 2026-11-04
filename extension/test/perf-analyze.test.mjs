@@ -29,36 +29,46 @@ function scenario() {
     m(3300, "report", { ready: 2, working: 1, failed: 0 }),
     m(4500, "report", { ready: 3, working: 0, failed: 0 }),
   ];
+  const q = (t, id, kind, name, more = {}) => m(t, `queue:${name}`, { id, kind, ...more });
   const offscreen = [
+    // page 99: read job 10, detect job 11
     m(1040, "page:begin", { rid: 1, len: 4900 }),
+    q(1040, 10, "read", "queued", { ahead: 0 }),
+    q(1041, 10, "read", "start"),
+    q(1100, 10, "read", "end"),
     m(1210, "page:detect-call", { rid: 1 }),
-    m(1210, "detect:queued", { ahead: 0 }),
-    m(1210, "detect:start"),
+    q(1210, 11, "detect", "queued", { ahead: 0 }),
+    q(1210, 11, "detect", "start"),
+    // page 100: read job 20, detect job 21 (queued behind 11, which has the same rank here)
     m(1100, "page:begin", { rid: 2, len: 5000 }),
+    q(1100, 20, "read", "queued", { ahead: 0 }),
+    q(1110, 20, "read", "start"),
+    q(1180, 20, "read", "end"),
     m(1180, "page:read", { rid: 2 }),
     m(1200, "page:hashed", { rid: 2, pageId: "P100" }),
     m(1210, "page:lookup", { rid: 2, cached: false }),
     m(1220, "page:detect-call", { rid: 2 }),
-    m(1220, "detect:queued", { ahead: 1 }),
-    m(2610, "detect:end"),
-    m(2610, "detect:start"),
-    m(3700, "detect:end"),
+    q(1220, 21, "detect", "queued", { ahead: 1 }),
+    q(2610, 11, "detect", "end"),
+    q(2610, 21, "detect", "start"),
+    q(3700, 21, "detect", "end"),
     m(3720, "page:detected", { rid: 2 }),
     m(3790, "page:image", { rid: 2 }),
     m(3800, "page:reply", { rid: 2 }),
+    // the OCR of page 100: the scheduler takes a place in the queue per bubble; the bubble is chosen when the place comes
+    q(3790, 30, "ocr", "queued", { ahead: 0 }),
     m(3795, "bubble:queued", { pageId: "P100", bubbleId: 0 }),
     m(3795, "bubble:queued", { pageId: "P100", bubbleId: 1 }),
+    q(3795, 30, "ocr", "start"),
     m(3795, "bubble:start", { pageId: "P100", bubbleId: 0 }),
-    m(3795, "ocr:queued", { ahead: 0 }),
-    m(3795, "ocr:start"),
-    m(3990, "ocr:end"),
     m(3990, "bubble:end", { pageId: "P100", bubbleId: 0 }),
+    q(3990, 30, "ocr", "end"),
     m(3995, "bubble:sunk", { pageId: "P100", bubbleId: 0 }),
+    q(3991, 31, "ocr", "queued", { ahead: 0 }),
+    q(3996, 31, "ocr", "start"),
     m(3996, "bubble:start", { pageId: "P100", bubbleId: 1 }),
-    m(3996, "ocr:queued", { ahead: 0 }),
-    m(3996, "ocr:start"),
-    m(4190, "ocr:end"),
     m(4190, "bubble:end", { pageId: "P100", bubbleId: 1 }),
+    q(4190, 31, "ocr", "end"),
     m(4195, "bubble:sunk", { pageId: "P100", bubbleId: 1 }),
   ].sort((a, b) => a.t - b.t || 0);
   return { content, offscreen };
@@ -96,7 +106,8 @@ test("analyzeJump: where the time went", () => {
     fetch: 50,
     toDataUrl: 20,
     workerHop: 18,
-    read: 80,
+    readQueueWait: 10,
+    read: 70,
     hash: 20,
     lookup: 10,
     detectQueueWait: 1390,
@@ -107,9 +118,7 @@ test("analyzeJump: where the time went", () => {
     layout: 10,
     ocrQueueWaitFirst: 0,
     ocrFirstBubble: 195,
-    ocrRuntimeWaitFirst: 0,
     ocrMsPerBubble: [195, 194],
-    ocrRunMsPerBubble: [195, 194],
   });
 });
 
@@ -170,28 +179,41 @@ test("analyzeJump: hovering a bubble -> time until its text is there (0 when it 
   assert.equal(run(undefined).hoverTextMs, null);
 });
 
-test("analyzeJump: an OCR job that waits in the runtime queue behind a detect is told apart from its run time", () => {
+test("analyzeJump: a job queued before this page's detect but started after it was overtaken (the priority queue at work)", () => {
   const { content, offscreen } = scenario();
-  const at = (t, name, data = {}) => ({ t, name, ...data });
-  // bubble 0's OCR is queued at 3795 behind a detect of another page (3795..5000) and runs 5000..5200; bubble 1 never starts
-  const log = offscreen
-    .filter((x) => !/^(ocr:(queued|start|end)|bubble:(start|end|sunk))$/.test(x.name))
-    .concat([
-      at(3795, "page:detect-call", { rid: 3 }), at(3795, "detect:queued", { ahead: 0 }), at(3795, "detect:start"),
-      at(3795, "bubble:start", { pageId: "P100", bubbleId: 0 }), at(3795, "ocr:queued", { ahead: 1 }),
-      at(5000, "detect:end"), at(5000, "ocr:start"), at(5200, "ocr:end"), at(5200, "bubble:end", { pageId: "P100", bubbleId: 0 }),
-    ])
-    .sort((a, b) => a.t - b.t);
-  const b = analyzeJump({ page: 100, keyOf: key, tScroll: 1000, content, offscreen: log, panel: [] }).breakdown;
-  assert.equal(b.ocrFirstBubble, 1405);
-  assert.equal(b.ocrRuntimeWaitFirst, 1205);
-  assert.deepEqual(b.ocrRunMsPerBubble, [200, null]);
+  // page 99's detect (job 11) is now queued behind page 100's: it starts after it
+  const reordered = offscreen.filter((x) => !(x.id === 11 && x.name !== "queue:queued")).concat([
+    { t: 3700, name: "queue:start", id: 11, kind: "detect" },
+    { t: 5100, name: "queue:end", id: 11, kind: "detect" },
+  ]);
+  reordered.find((x) => x.id === 21 && x.name === "queue:start").t = 1230;
+  reordered.find((x) => x.id === 21 && x.name === "queue:end").t = 2650;
+  const r = analyzeJump({ page: 100, keyOf: key, tScroll: 1000, content, offscreen: reordered.sort((a, b) => a.t - b.t), panel: [] });
+  assert.equal(r.detectsAhead, 0);
+  assert.deepEqual(r.detectAheadPages, []);
+  assert.equal(r.detectsOvertaken, 1);
+  assert.equal(r.breakdown.detectQueueWait, 10);
+});
+
+test("analyzeJump: a detect that was dropped from the queue is reported as dropped", () => {
+  const { content, offscreen } = scenario();
+  const dropped = offscreen.filter((x) => !(x.id === 21 && x.name !== "queue:queued")).concat([{ t: 2000, name: "queue:dropped", id: 21, kind: "detect" }]);
+  const r = analyzeJump({ page: 100, keyOf: key, tScroll: 1000, content, offscreen: dropped.sort((a, b) => a.t - b.t), panel: [] });
+  assert.equal(r.dropped, true);
 });
 
 test("analyzeJump: the content script's and the offscreen document's clocks differ by a few ms; a request is matched by length and nearest time", () => {
   const { content, offscreen } = scenario();
-  const skewed = offscreen.map((x) => ({ ...x, t: x.t - (x.name === "page:begin" && x.rid === 2 ? 20 : 0) }));
+  const skewed = offscreen.map((x) => ({ ...x, t: x.t - 20 })); // the whole offscreen clock runs 20 ms behind
   const b = analyzeJump({ page: 100, keyOf: key, tScroll: 1000, content, offscreen: skewed.sort((a, c) => a.t - c.t), panel: [] }).breakdown;
   assert.equal(b.workerHop, -2); // 1080 - 1082: the skew shows up here (and in replyHop) as a negative or inflated hop
-  assert.equal(b.read, 100);
+  assert.equal(b.read, 70);
+});
+
+test("analyzeJump: when the next two pages got all their texts (badge done), from the arrival; null if they never did", () => {
+  const { content, offscreen } = scenario();
+  content.push(m(5000, "badge", { key: key(101), phase: "ocr", done: 3, total: 3 }));
+  content.push(m(5200, "badge", { key: key(102), phase: "ocr", done: 1, total: 4 }));
+  const r = analyzeJump({ page: 100, keyOf: key, tScroll: 1000, content: content.sort((a, b) => a.t - b.t), offscreen, panel: [] });
+  assert.deepEqual(r.neighboursMs, [4000, null]);
 });

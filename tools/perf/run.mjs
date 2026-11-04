@@ -4,6 +4,7 @@
 //
 //   node tools/perf/run.mjs [--headful] [--pages=200] [--jumps=100,150] [--lazy=on|off|both] [--fling]
 //                           [--latency=40] [--top-wait=3000] [--dwell=3000] [--no-cache] [--hover] [--out=name]
+//   --park   after each jump keep waiting until pages +1 and +2 have all their texts (prefetch must still get there)
 //   --hover  also hover the first bubble of the page as soon as it is clickable and time its text (this prioritizes that
 //            bubble, so first-text numbers of a --hover run are not comparable with a run without it)
 //
@@ -27,6 +28,7 @@ const flag = (name, dflt) => { const a = args.find((x) => x.startsWith(`--${name
 const headful = args.includes("--headful");
 const fling = args.includes("--fling");
 const hoverFirst = args.includes("--hover");
+const park = args.includes("--park"); // after each jump, also wait (up to 60 s) until the next two pages have their texts
 const pages = Number(flag("pages", 200));
 const jumps = flag("jumps", "100,150").split(",").map(Number);
 const lazyArg = flag("lazy", "on");
@@ -137,6 +139,13 @@ async function variant(chromePath, lazy) {
       const st = await sw.evaluate('chrome.storage.session.get("modelStatus").then((r) => r.modelStatus || null)');
       return st && (st.state === "ready" || st.state === "error") ? st : null;
     }, "the engine", 300000);
+    // "ready" comes before the warm-up and the speed check (engine/startup.js); a page opened meanwhile waits for them.
+    // Time only from the settled engine: the status then carries the mode.
+    const settled = await waitFor(async () => {
+      const st = await sw.evaluate('chrome.storage.session.get("modelStatus").then((r) => r.modelStatus || null)');
+      return st && (st.state === "error" || st.mode) ? st : null;
+    }, "the engine to settle (warm-up and speed check)", 120000);
+    Object.assign(status, settled);
     const bench = await sw.evaluate('chrome.storage.local.get("benchmark").then((r) => r.benchmark || null)');
     result.engine = { state: status.state, ep: status.ep || null, mode: status.mode || null, benchmark: bench, userAgent: await sw.evaluate("navigator.userAgent") };
     console.log(`engine: ${status.state} ep=${status.ep} mode=${status.mode}${bench ? ` benchmark=${JSON.stringify(bench)}` : ""}`);
@@ -209,6 +218,19 @@ async function variant(chromePath, lazy) {
           return L.some((m) => m.name === "badge" && m.key === ${JSON.stringify(key)} && m.phase === "ocr" && m.done >= m.total && m.t >= ${tScroll} - 5);
         })()`), `page ${page} to finish`, DONE_TIMEOUT).catch(() => false);
         await hovering;
+        if (args.includes("--probe-scroll")) {
+          for (let i = 0; i < 12; i++) {
+            console.log("   scroll", JSON.stringify(await tab.evaluate("({y: scrollY, h: document.documentElement.scrollHeight, p: document.getElementById('p" + page + "').getBoundingClientRect().top|0})")));
+            await sleep(500);
+          }
+        }
+        if (park) {
+          const next = JSON.stringify([1, 2].map((k) => keyOf(page + k)));
+          await waitFor(() => inWorld(`(() => {
+            const L = globalThis.__amTrace || [];
+            return ${next}.every((k) => L.some((m) => m.name === "badge" && m.key === k && m.phase === "ocr" && m.done >= m.total && m.t >= ${tScroll} - 5));
+          })()`), `pages after ${page} to finish`, 60000).catch(() => false);
+        }
         // let the panel summary and the last relays arrive
         await sleep(1500);
         if (hoverFirst) await tab.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 2, y: 2 });

@@ -181,3 +181,112 @@ test("without a trace log the scheduler leaves no global behind", async () => {
   await s.idle();
   assert.equal(globalThis.__amTrace, undefined);
 });
+
+// --- priorities: pages by rank, hover first, late-bound place in the engine's queue ----------------------------------
+import { Gate } from "../engine/rank-gate.js";
+
+test("pages run by their rank (nearest first), not in arrival order; bubbles stay in reading order", async () => {
+  const f = fakeOcr();
+  const ranks = { far: 3, near: 1 };
+  const s = new OcrScheduler(f.runOcr, () => {}, { pageRank: (id) => ranks[id] });
+  const seen = [];
+  s.runOcr = async (rgba, bubble) => { seen.push(bubble.id); return "t"; };
+  s.enqueuePage("far", RGBA, mk(2));
+  s.enqueuePage("near", RGBA, [{ id: 10, text: null }, { id: 11, text: null }]);
+  await s.idle();
+  assert.deepEqual(seen, [10, 11, 0, 1]);
+});
+
+test("a rank that changed between two bubbles is honoured at the next pick; far pages still run, last", async () => {
+  const seen = [];
+  const ranks = { a: 0, b: 1 };
+  const s = new OcrScheduler(async (rgba, bubble) => { seen.push(bubble.id); if (bubble.id === 0) { ranks.a = 9; ranks.b = 0; } return "t"; }, () => {}, { pageRank: (id) => ranks[id] });
+  s.enqueuePage("a", RGBA, [{ id: 0, text: null }, { id: 1, text: null }]);
+  s.enqueuePage("b", RGBA, [{ id: 10, text: null }, { id: 11, text: null }]);
+  await s.idle();
+  assert.deepEqual(seen, [0, 10, 11, 1]); // the user scrolled to b after the first bubble of a; a's second bubble still ran
+});
+
+test("a hovered bubble beats every page rank", async () => {
+  const f = fakeOcr({ blockFirst: true });
+  const s = new OcrScheduler(f.runOcr, () => {}, { pageRank: (id) => (id === "near" ? 0 : 5) });
+  s.enqueuePage("far", RGBA, mk(2));
+  await f.firstStarted;
+  s.enqueuePage("near", RGBA, mk(2));
+  s.prioritize("far", 1);
+  f.release();
+  await s.idle();
+  assert.deepEqual(f.calls.slice(0, 2), [0, 1]); // call 0 was far/0 (already running); then far/1 (hover), then near
+});
+
+test("a place in the engine's queue is late-bound: the bubble is chosen when the place comes, so a hover made while waiting wins", async () => {
+  const gate = new Gate();
+  const order = [];
+  const ran = [];
+  const release = [];
+  // a detect job of the engine holds the queue
+  gate.submit("detect", () => new Promise((r) => release.push(r)), { rank: () => 0 });
+  const s = new OcrScheduler(async (rgba, bubble) => { ran.push(bubble.id); return "t"; }, () => {}, {
+    slot: (rank, run) => gate.submit("ocr", run, { rank }),
+  });
+  await new Promise((r) => setTimeout(r, 5));
+  s.enqueuePage("p", RGBA, mk(5));
+  await new Promise((r) => setTimeout(r, 5)); // the scheduler has taken its place behind the detect
+  s.prioritize("p", 4);
+  release[0]();
+  await s.idle();
+  order.push(...ran);
+  assert.deepEqual(order.slice(0, 2), [4, 0]);
+});
+
+test("a hovered bubble jumps the engine's queue: its place outranks queued detects", async () => {
+  const gate = new Gate();
+  const log = [];
+  const releaseRunning = [];
+  gate.submit("detect", () => new Promise((r) => releaseRunning.push(r)), { rank: () => 0 });
+  await new Promise((r) => setTimeout(r, 5));
+  gate.submit("detect", async () => { log.push("detect"); }, { rank: () => 0.5 });
+  const s = new OcrScheduler(async (rgba, bubble) => { log.push(`ocr${bubble.id}`); return "t"; }, () => {}, {
+    slot: (rank, run) => gate.submit("ocr", run, { rank }),
+    pageRank: () => 1, // a neighbour page: behind the queued detect
+  });
+  s.enqueuePage("p", RGBA, mk(2));
+  await new Promise((r) => setTimeout(r, 5));
+  s.prioritize("p", 1); // hover
+  releaseRunning[0]();
+  await s.idle();
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(log.slice(0, 2), ["ocr1", "detect"]);
+});
+
+test("clear() while a place is pending leaves nothing behind", async () => {
+  const gate = new Gate();
+  const release = [];
+  gate.submit("detect", () => new Promise((r) => release.push(r)));
+  await new Promise((r) => setTimeout(r, 5));
+  const ran = [];
+  const s = new OcrScheduler(async (rgba, bubble) => { ran.push(bubble.id); return "t"; }, () => {}, { slot: (rank, run) => gate.submit("ocr", run, { rank }) });
+  s.enqueuePage("p", RGBA, mk(3));
+  s.clear();
+  release[0]();
+  await s.idle();
+  assert.deepEqual(ran, []);
+});
+
+test("between two bubbles of the visible page, a queued detect of a farther page does not slip in", async () => {
+  const gate = new Gate();
+  const log = [];
+  const release = [];
+  gate.submit("detect", () => new Promise((r) => release.push(r)), { rank: () => 0 }); // the visible page's detect is running
+  await new Promise((r) => setTimeout(r, 5));
+  gate.submit("detect", async () => { log.push("detect of a neighbour"); }, { rank: () => 0.4 });
+  const s = new OcrScheduler(async (rgba, bubble) => { log.push(`bubble${bubble.id}`); return "t"; }, () => {}, {
+    slot: (rank, run) => gate.submit("ocr", run, { rank }),
+    pageRank: () => 0,
+  });
+  s.enqueuePage("visible", RGBA, mk(3));
+  release[0]();
+  await s.idle();
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(log, ["bubble0", "bubble1", "bubble2", "detect of a neighbour"]);
+});

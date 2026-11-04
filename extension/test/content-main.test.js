@@ -7,6 +7,8 @@ const vm = require("node:vm");
 
 const PageFinder = require("../content/page-finder.js");
 const source = fs.readFileSync(path.join(__dirname, "../content/main.js"), "utf8");
+// every am:page also carries how far its image is from the screen (here: on it), numbered from 1
+const PRIO = { d: 0, p: 0, n: 1 };
 const plain = (x) => JSON.parse(JSON.stringify(x)); // objects made inside the vm context have another prototype
 const tick = () => new Promise((r) => setImmediate(r));
 const flush = async () => {
@@ -38,7 +40,7 @@ function makeCanvas(rect = { left: 0, top: 0, width: 1000, height: 5000 }) {
 
 // replies: message type -> (msg) => reply. Returns the sandbox handles the tests need.
 // fetch: url -> truthy (a response) or throws; canvas: "ok" | "tainted" (what a canvas copy of an <img> gives).
-async function load({ imgs = [makeImg()], canvases = [], replies: given = {}, fetch: fetchImpl = () => { throw new TypeError("Failed to fetch"); }, canvas = "tainted", blobSize = 1000, trace = false } = {}) {
+async function load({ imgs = [makeImg()], canvases = [], replies: given = {}, fetch: fetchImpl = () => { throw new TypeError("Failed to fetch"); }, canvas = "tainted", blobSize = 1000, trace = false, now = 0 } = {}) {
   const replies = { "am:page": () => ({ ok: true, page: page([null]) }), ...given };
   const sent = [];
   const timers = [];
@@ -100,6 +102,7 @@ async function load({ imgs = [makeImg()], canvases = [], replies: given = {}, fe
     URL,
     Promise,
     performance, // only read while the harness trace is on
+    Date: { now: () => now }, // the numbering of priority reports starts here
     ...(trace ? { __amTrace: [] } : {}),
     fetch: async (url) => {
       fetched.push(url);
@@ -159,6 +162,7 @@ async function load({ imgs = [makeImg()], canvases = [], replies: given = {}, fe
   vm.runInContext(source, vm.createContext(sandbox));
   await flush();
   const env = {
+    window: sandbox.window,
     log: sandbox.__amTrace,
     sent,
     handles,
@@ -331,7 +335,7 @@ test("a same-origin image is fetched by the content script and its bytes go to t
   const env = await load({ imgs: [makeImg(SAME)], fetch: () => true });
   await env.intersect(env.imgs[0], {});
   assert.deepEqual(env.fetched, [SAME]);
-  assert.deepEqual(plain(env.ofType("am:page")), [{ type: "am:page", imageUrl: SAME, dataUrl: fake(SAME) }]);
+  assert.deepEqual(plain(env.ofType("am:page")), [{ type: "am:page", imageUrl: SAME, dataUrl: fake(SAME), priority: PRIO }]);
   assert.equal(env.handles.length, 1);
 });
 
@@ -346,7 +350,7 @@ test("when the fetch fails, the image the page already shows is copied through a
 test("when fetch and canvas both fail, the worker is asked with the URL only", async () => {
   const env = await load({ imgs: [makeImg(SAME)], fetch: () => false, canvas: "tainted" });
   await env.intersect(env.imgs[0], {});
-  assert.deepEqual(plain(env.ofType("am:page")), [{ type: "am:page", imageUrl: SAME }]);
+  assert.deepEqual(plain(env.ofType("am:page")), [{ type: "am:page", imageUrl: SAME, priority: PRIO }]);
 });
 
 test("the canvas copy is only made of the image the <img> shows: a placeholder under data-src is not copied", async () => {
@@ -355,7 +359,7 @@ test("the canvas copy is only made of the image the <img> shows: a placeholder u
   const env = await load({ imgs: [img], fetch: () => { throw new TypeError("network"); }, canvas: "ok" });
   await env.intersect(img, {});
   assert.equal(env.drawn.length, 0);
-  assert.deepEqual(plain(env.ofType("am:page")), [{ type: "am:page", imageUrl: real }]);
+  assert.deepEqual(plain(env.ofType("am:page")), [{ type: "am:page", imageUrl: real, priority: PRIO }]);
 });
 
 test("the canvas copy is made when currentSrc is the URL (hash ignored)", async () => {
@@ -394,7 +398,7 @@ test("an image that is not displayed yet is not copied through a canvas", async 
   const env = await load({ imgs: [lazy], fetch: () => false, canvas: "ok" });
   await env.intersect(lazy, {});
   assert.equal(env.drawn.length, 0);
-  assert.deepEqual(plain(env.ofType("am:page")), [{ type: "am:page", imageUrl: SAME }]);
+  assert.deepEqual(plain(env.ofType("am:page")), [{ type: "am:page", imageUrl: SAME, priority: PRIO }]);
 });
 
 test("a blob: image is never sent to the worker as a URL; when its bytes can't be read, it is screenshotted", async () => {
@@ -437,7 +441,7 @@ test("a fetch that throws twice falls back as before (canvas, then the URL)", as
   assert.equal(env.ofType("am:page")[0].dataUrl, fake("canvas"));
   const bare = await load({ imgs: [makeImg(SAME)], fetch: dead });
   await bare.intersect(bare.imgs[0], {});
-  assert.deepEqual(plain(bare.ofType("am:page")), [{ type: "am:page", imageUrl: SAME }]);
+  assert.deepEqual(plain(bare.ofType("am:page")), [{ type: "am:page", imageUrl: SAME, priority: PRIO }]);
 });
 
 test("a failure is a fetch that threw on both tries; a success in between resets the count", async () => {
@@ -471,7 +475,7 @@ test("an HTTP error from a CDN host does not stop the content script from fetchi
 test("an image whose data URL would be over 48 MB is left to the worker's own fetch", async () => {
   const env = await load({ imgs: [makeImg(SAME)], fetch: () => true, blobSize: 40 * 1024 * 1024 }); // 53 MB as base64
   await env.intersect(env.imgs[0], {});
-  assert.deepEqual(plain(env.ofType("am:page")), [{ type: "am:page", imageUrl: SAME }]);
+  assert.deepEqual(plain(env.ofType("am:page")), [{ type: "am:page", imageUrl: SAME, priority: PRIO }]);
   const small = await load({ imgs: [makeImg(SAME)], fetch: () => true, blobSize: 30 * 1024 * 1024 }); // 40 MB
   await small.intersect(small.imgs[0], {});
   assert.ok(small.ofType("am:page")[0].dataUrl);
@@ -854,4 +858,125 @@ test("trace: without the harness flag nothing is recorded and no global appears"
   await env.message({ type: "am:bubble-text", pageId: "P", bubbleId: 0, text: "あ" });
   assert.equal(env.log, undefined);
   assert.equal(env.ofType("am:page").length, 1);
+});
+
+// --- visible page first: priorities for the engine, pages that left the zone ---------------------------------------------
+const at = (top, height = 1200) => ({ getBoundingClientRect: () => ({ left: 0, top, width: 800, height, right: 800, bottom: top + height }) });
+// innerHeight is 2000 in the sandbox: one viewport = 2000 px
+
+test("priority: an am:page request carries how far its image is from the screen (0 = visible)", async () => {
+  const env = await load({ imgs: [makeImg("https://cdn.example/p1.jpg", at(100)), makeImg("https://cdn.example/p2.jpg", at(3200))], fetch: () => true });
+  await env.intersect(env.imgs[0], {});
+  await env.intersect(env.imgs[1], {});
+  const [a, b] = env.ofType("am:page").map((m) => plain(m.priority));
+  assert.deepEqual([a.d, a.p], [0, 0]);
+  assert.equal(b.d, 0.6); // 1200 px below the screen: 0.6 viewport
+  assert.equal(b.p, 0.7); // off the screen: 0.1 + d, ahead of the (default) downward scroll: no penalty
+  assert.ok(b.n > a.n, "reports are numbered");
+});
+
+test("priority: a page behind the scroll direction ranks a little worse than one at the same distance ahead", async () => {
+  const env = await load({ imgs: [makeImg("https://cdn.example/p1.jpg", at(-3400)), makeImg("https://cdn.example/p2.jpg", at(4200))], fetch: () => true });
+  await env.intersect(env.imgs[0], {});
+  await env.intersect(env.imgs[1], {});
+  const [above, below] = env.ofType("am:page").map((m) => plain(m.priority));
+  assert.equal(above.d, below.d);
+  assert.ok(above.p > below.p, "scrolling down: the page above is behind");
+  env.window.scrollY = 500; // scrolled down...
+  await env.scroll();
+  env.window.scrollY = 100; // ...and now up
+  await env.scroll();
+  await env.fire(120);
+  const items = plain(env.ofType("am:priorities").at(-1).items);
+  const [aboveNow, belowNow] = [items.find((i) => i.key.endsWith("p1.jpg")), items.find((i) => i.key.endsWith("p2.jpg"))];
+  assert.ok(aboveNow.p < belowNow.p, "scrolling up: the page above is ahead");
+});
+
+test("priority: a page already beyond 2 viewports when its bytes are ready is not sent (deferred), and is watched again", async () => {
+  const img = makeImg("https://cdn.example/p1.jpg", at(6500)); // 4500 px = 2.25 viewports below the screen
+  const env = await load({ imgs: [img], fetch: () => true });
+  const seen = env.observeLog.length;
+  await env.intersect(img, {});
+  assert.equal(env.ofType("am:page").length, 0);
+  assert.equal(env.observeLog.length, seen + 1, "the image is observed again");
+  assert.equal(env.badges.get(img)?.state ?? null, null, "no badge, no error");
+  // back near the screen: processed
+  img.getBoundingClientRect = at(2500).getBoundingClientRect;
+  await env.intersect(img, {});
+  assert.equal(env.ofType("am:page").length, 1);
+});
+
+test("deferred: the engine dropped the request -> no badge, no error, forgotten, observed again, and sent again next time", async () => {
+  let reply = { ok: false, error: "deferred" };
+  const env = await load({ fetch: () => true, replies: { "am:page": () => reply } });
+  const [img] = env.imgs;
+  const seen = env.observeLog.length;
+  await env.intersect(img, {});
+  assert.equal(env.ofType("am:page").length, 1);
+  assert.equal(env.observeLog.length, seen + 1);
+  assert.ok(!env.badges.get(img) || env.badges.get(img).state === null, "the 'finding bubbles' badge is gone");
+  assert.equal(env.ofType("am:missing-host").length, 0);
+  assert.equal(env.captures().length + env.probes().length, 0, "not treated as an unreadable image");
+  reply = { ok: true, page: page([null]) };
+  await env.intersect(img, {});
+  assert.equal(env.ofType("am:page").length, 2, "a deferred request is not cached in results");
+  assert.equal(env.handles.length, 1);
+});
+
+test("deferred never counts as failed in the summary", async () => {
+  const env = await load({ fetch: () => true, replies: { "am:page": () => ({ ok: false, error: "deferred" }) } });
+  await env.intersect(env.imgs[0], {});
+  await env.fire(300);
+  const states = [...env.badges.values()].map((b) => b.state).filter(Boolean);
+  assert.deepEqual(states, []);
+});
+
+test("priorities: pending requests and unfinished pages are reported on scroll, throttled; finished pages are not", async () => {
+  const done = makeImg("https://cdn.example/p1.jpg", at(100));
+  const open = makeImg("https://cdn.example/p2.jpg", at(1400));
+  const env = await load({
+    imgs: [done, open],
+    fetch: () => true,
+    replies: { "am:page": (m) => ({ ok: true, page: m.imageUrl.endsWith("p1.jpg") ? { ...page([null]), page_id: "A" } : { ...page([null, null]), page_id: "B" } }) },
+  });
+  await env.intersect(done, {});
+  await env.intersect(open, {});
+  await env.message({ type: "am:bubble-text", pageId: "A", bubbleId: 0, text: "あ" }); // page A is finished
+  await env.scroll();
+  await env.scroll();
+  assert.equal(env.pendingTimers(120).length, 1, "one timer however many scroll events");
+  await env.fire(120);
+  const msgs = env.ofType("am:priorities");
+  assert.equal(msgs.length, 1);
+  assert.deepEqual(plain(msgs[0].items).map((i) => i.key), ["https://cdn.example/p2.jpg"]);
+  assert.ok(Number.isFinite(msgs[0].items[0].d) && Number.isFinite(msgs[0].items[0].p) && Number.isFinite(msgs[0].items[0].n));
+});
+
+test("priorities: nothing is sent when there is nothing to report", async () => {
+  const env = await load({ imgs: [] });
+  await env.scroll();
+  await env.fire(120);
+  assert.equal(env.ofType("am:priorities").length, 0);
+});
+
+test("priority: on the screen the most visible page ranks first (below 0.1), off the screen 0.1 + distance", async () => {
+  // viewport 2000 px high
+  const env = await load({
+    imgs: [makeImg("https://cdn.example/a.jpg", at(0, 1900)), makeImg("https://cdn.example/b.jpg", at(1940, 1900)), makeImg("https://cdn.example/c.jpg", at(3900, 1900))],
+    fetch: () => true,
+  });
+  for (const img of env.imgs) await env.intersect(img, {});
+  const [a, b, c] = env.ofType("am:page").map((m) => plain(m.priority));
+  assert.equal(a.p, 0); // all of it is on the screen
+  assert.ok(b.p > a.p && b.p < 0.1, "a sliver of the next page: on the screen, but behind the full page");
+  assert.deepEqual([a.d, b.d, c.d], [0, 0, 0.95]);
+  assert.equal(c.p, 1.05);
+});
+
+test("priority: reports are numbered so that a reloaded page's first report is newer than any report of the copy before it", async () => {
+  const before = await load({ now: 1000, fetch: () => true });
+  await before.intersect(before.imgs[0], {});
+  const after = await load({ now: 2000, fetch: () => true });
+  await after.intersect(after.imgs[0], {});
+  assert.ok(after.ofType("am:page")[0].priority.n > before.ofType("am:page")[0].priority.n);
 });

@@ -84,6 +84,78 @@
     }, 300);
   }
 
+  // --- priorities: what the engine should do first ------------------------------------------------
+  // The engine works through one queue of pages. It reads from here how far each page is from the screen (d, in viewports,
+  // 0 = visible) and a rank (p: d, plus a penalty behind the scroll direction), numbered by n so a late report never
+  // overwrites a newer one. Sent with every am:page and, throttled, as scrolling goes on.
+  const FAR_VIEWPORTS = 2; // beyond this a page is not worth the engine's time now (the prefetch zone is 1.5)
+  const BEHIND_PENALTY = 0.25;
+  const PRIORITY_MS = 120;
+  const scrollDir = { x: 0, y: 1 }; // +1 = down / right; vertical readers start downwards
+  const lastScroll = new WeakMap();
+  let prioritySeq = Date.now(); // the engine outlives this copy of the script: a reload must not restart below its last report
+  let priorityTimer = null;
+  const round3 = (x) => Math.round(x * 1000) / 1000;
+
+  // d: the gap between the element and the screen, in viewports (0 = touching or on it). p: the rank. A page on the screen
+  // ranks below 0.1, the most visible first (a page that fills the screen beats a sliver of its neighbour); a page off
+  // the screen ranks 0.1 + d, a little worse if it is behind the scroll direction.
+  function priorityOf(el) {
+    const r = el.getBoundingClientRect();
+    const w = window.innerWidth || 1;
+    const h = window.innerHeight || 1;
+    const up = r.bottom < 0;
+    const left = r.right < 0;
+    const dy = (up ? -r.bottom : r.top > h ? r.top - h : 0) / h;
+    const dx = (left ? -r.right : r.left > w ? r.left - w : 0) / w;
+    const d = Math.max(dx, dy);
+    const overlapY = Math.min(r.bottom, h) - Math.max(r.top, 0);
+    let p;
+    if (overlapY > 0 && Math.min(r.right, w) - Math.max(r.left, 0) > 0) {
+      p = 0.1 * (1 - Math.min(1, overlapY / Math.min(r.height || 1, h)));
+    } else {
+      const vertical = dy >= dx;
+      const side = (vertical ? up : left) ? -1 : 1;
+      const behind = d > 0 && side === -(vertical ? scrollDir.y : scrollDir.x);
+      p = 0.1 + d + (behind ? BEHIND_PENALTY : 0);
+    }
+    return { d: round3(d), p: round3(p), n: ++prioritySeq };
+  }
+
+  function trackScroll(e) {
+    const t = e && e.target && e.target.nodeType === 1 ? e.target : window;
+    const x = t === window ? window.scrollX : t.scrollLeft;
+    const y = t === window ? window.scrollY : t.scrollTop;
+    const last = lastScroll.get(t);
+    if (last) {
+      if (y !== last.y) scrollDir.y = y > last.y ? 1 : -1;
+      if (x !== last.x) scrollDir.x = x > last.x ? 1 : -1;
+    }
+    lastScroll.set(t, { x, y });
+  }
+
+  // Pending requests and pages with texts still missing; finished pages need no rank.
+  function sendPriorities() {
+    const items = [];
+    for (const [img, rec] of byImg) {
+      if (!rec.key || rec.key.startsWith("capture:") || rec.failed || !img.isConnected) continue;
+      if (rec.handle) {
+        const { done, total } = rec.handle.progress();
+        if (done >= total) continue;
+      }
+      items.push({ key: rec.key, ...priorityOf(img) });
+    }
+    if (items.length) send({ type: "am:priorities", items });
+  }
+
+  function prioritiesSoon() {
+    if (priorityTimer) return;
+    priorityTimer = setTimeout(() => {
+      priorityTimer = null;
+      sendPriorities();
+    }, PRIORITY_MS);
+  }
+
   // --- overlays ---------------------------------------------------------------------
   const overlayOpts = {
     onHover(pageId, bubbleId, text) {
@@ -190,8 +262,11 @@
   async function loadPage(img, url) {
     const dataUrl = await pageBytes(img, url);
     if (url.startsWith("blob:") && !dataUrl) return { ok: false, error: "fetch_failed" }; // the worker can't open it
-    trace("send", url, { len: dataUrl ? dataUrl.length : null });
-    const res = await send(dataUrl ? { type: "am:page", imageUrl: url, dataUrl } : { type: "am:page", imageUrl: url });
+    const priority = priorityOf(img);
+    // The reader moved on while the bytes were loading: not worth the engine's time now (the image is watched again).
+    if (priority.d > FAR_VIEWPORTS) return { ok: false, error: "deferred" };
+    trace("send", url, { len: dataUrl ? dataUrl.length : null, d: priority.d, p: priority.p });
+    const res = await send(dataUrl ? { type: "am:page", imageUrl: url, dataUrl, priority } : { type: "am:page", imageUrl: url, priority });
     trace("reply", url, { ok: !!(res && res.ok), error: res && res.error });
     return res;
   }
@@ -203,6 +278,7 @@
     const current = byImg.get(img);
     if (current && current.key === key && attempt === 0) return;
     byImg.set(img, { key, handle: null });
+    prioritiesSoon();
     // No badge until the image is laid out: a lazy placeholder may turn out to be an icon.
     if ((!results.has(key) || attempt > 0) && isShown(img)) setState(img, { phase: "detecting" });
 
@@ -213,6 +289,7 @@
     }
     const res = await pending;
     if (!(res && res.ok)) results.delete(key);
+    if (res && res.error === "deferred") return forget(img, key);
     if (res && res.ok) {
       waitingPermission.delete(img);
       engineFailures.delete(img);
@@ -252,6 +329,17 @@
       byImg.set(img, { key, handle: null, failed: error });
       if (UNREADABLE.has(error)) queueCapture(img);
     }
+  }
+
+  // The engine (or this script) set the request aside because the page left the zone: no badge, no error. Observing the
+  // image again starts it the next time it is near the screen.
+  function forget(img, key) {
+    const cur = byImg.get(img);
+    if (!cur || cur.key !== key) return;
+    byImg.delete(img);
+    setState(img, null);
+    io.unobserve(img);
+    io.observe(img);
   }
 
   function retryLater(img, attempt, delay) {
@@ -613,6 +701,15 @@
       for (const b of badges.values()) b.update();
     });
   }
+  window.addEventListener(
+    "scroll",
+    (e) => {
+      trackScroll(e);
+      prioritiesSoon();
+    },
+    { passive: true, capture: true },
+  );
+  window.addEventListener("resize", prioritiesSoon, { passive: true });
   window.addEventListener("resize", updateAll, { passive: true });
   window.addEventListener("scroll", updateAll, { passive: true, capture: true });
   new ResizeObserver(updateAll).observe(document.documentElement);

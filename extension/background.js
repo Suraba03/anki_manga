@@ -153,7 +153,7 @@ async function processImage(msg) {
     if (typeof msg.dataUrl !== "string" || !msg.dataUrl.startsWith("data:") || msg.dataUrl.length > MAX_DATA_URL) {
       return { ok: false, error: "bad_image" };
     }
-    return engineCall({ type: "eng:page", source: { dataUrl: msg.dataUrl }, ocr: await ocrScope() });
+    return engineCall({ type: "eng:page", source: { dataUrl: msg.dataUrl }, key: msg.imageUrl, priority: msg.priority, ocr: await ocrScope() });
   }
   const url = new URL(msg.imageUrl);
   if (url.protocol !== "http:" && url.protocol !== "https:") return { ok: false, error: "fetch_failed" }; // e.g. blob:
@@ -161,7 +161,7 @@ async function processImage(msg) {
   if (!(await chrome.permissions.contains({ origins: [pattern] }))) {
     return { ok: false, error: "no_image_permission", host: url.host };
   }
-  return engineCall({ type: "eng:page", source: { url: msg.imageUrl }, ocr: await ocrScope() });
+  return engineCall({ type: "eng:page", source: { url: msg.imageUrl }, key: msg.imageUrl, priority: msg.priority, ocr: await ocrScope() });
 }
 
 export async function relayText({ pageId, bubbleId, text }) {
@@ -305,6 +305,8 @@ const handlers = {
     return { ok: true };
   },
   "am:prioritize": prioritize,
+  // How far each page the tab is working on is from the screen: the engine reads it at every pick of its queues.
+  "am:priorities": async (msg, sender) => (sender.tab ? engineCall({ type: "eng:priorities", items: msg.items }) : { ok: false }),
   "am:perf-mode": async (msg, sender) => (sender.tab ? { ok: true, mode: await perfMode() } : { ok: false }),
   "am:engine": async (msg, sender) => (sender.tab ? { ok: false } : engineCall(msg.msg)), // panel only
   // Messages from the offscreen document (a content script must not be able to send these). The
