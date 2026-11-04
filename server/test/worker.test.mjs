@@ -292,15 +292,17 @@ test("a refused line reaches the extension as 422 explanation_refused with CORS"
 });
 
 const STORE_ORIGIN = "chrome-extension://bgfnpifeeclmpfdcahphaiahgafjppeo";
+// Temporary: the owner's unpacked development builds (lane A and lane B checkouts), to be removed later.
+const DEV_ORIGINS = ["chrome-extension://aimemjiaackefknhadaljaoneahoaefd", "chrome-extension://mbcjdgjmpgkoiccnblkhkfjpdaclgihm"];
 
-test("wrangler.toml allows exactly the Web Store extension, no wildcard", () => {
+test("wrangler.toml allows exactly the Web Store extension and the owner's two dev builds, no wildcard", () => {
   const toml = readFileSync(new URL("../wrangler.toml", import.meta.url), "utf8");
   const value = toml.match(/^ALLOWED_ORIGINS = "([^"]*)"$/m)[1];
   const list = value.split(",").map((s) => s.trim());
-  assert.ok(list.includes(STORE_ORIGIN));
+  assert.deepEqual(list, [STORE_ORIGIN, ...DEV_ORIGINS]);
   assert.ok(list.every((o) => /^chrome-extension:\/\/[a-p]{32}$/.test(o)), `exact extension origins only: ${value}`);
   const config = parseConfig({ ...ENV, ALLOWED_ORIGINS: value });
-  assert.equal(originAllowed(STORE_ORIGIN, config), true);
+  for (const o of [STORE_ORIGIN, ...DEV_ORIGINS]) assert.equal(originAllowed(o, config), true);
   assert.equal(originAllowed("chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", config), false);
   assert.equal(originAllowed("https://example.com", config), false);
 });

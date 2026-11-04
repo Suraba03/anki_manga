@@ -16,10 +16,11 @@ PRICE_OUT = "0.0000012"
 # The model name the pricing page lists (the extension's own-key default is the same).
 # VERIFY before deploy that it is still current.
 LLM_MODEL = "deepseek-flash"
-# Comma-separated exact origins: the Chrome Web Store build. The owner's unpacked development build can be
-# added as a second entry, chrome-extension://<its id> (the ID changes when the unpacked folder moves).
+# Comma-separated exact origins. First the Chrome Web Store build; then, TEMPORARILY, the owner's two unpacked
+# development builds (one per checkout folder), to be removed later. An unpacked build's ID comes from its folder's
+# absolute path (SHA-256, first 32 hex digits mapped 0-f to a-p), so it changes when the folder moves.
 # "chrome-extension://*" (any extension) is still understood by originAllowed but must not ship.
-ALLOWED_ORIGINS = "chrome-extension://bgfnpifeeclmpfdcahphaiahgafjppeo"
+ALLOWED_ORIGINS = "chrome-extension://bgfnpifeeclmpfdcahphaiahgafjppeo,chrome-extension://aimemjiaackefknhadaljaoneahoaefd,chrome-extension://mbcjdgjmpgkoiccnblkhkfjpdaclgihm"
 # "1" lets requests without an Origin header through (curl). Keep "0" in production;
 # the local smoke test sets it with: wrangler dev --var ALLOW_NO_ORIGIN:1
 ALLOW_NO_ORIGIN = "0"

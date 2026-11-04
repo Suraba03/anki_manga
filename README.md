@@ -252,7 +252,7 @@ cd server && node --test                  # free-tier Worker tests (no install n
   2. `npx wrangler d1 create anki-manga`, paste the printed id into `wrangler.toml`, then `npx wrangler d1 execute anki-manga --remote --file schema.sql`
   3. `npx wrangler secret put DEEPSEEK_API_KEY` and `npx wrangler secret put IP_SALT`
   4. Check the price and model variables in `wrangler.toml`, then `npm run deploy`
-  5. Put the Worker's URL in `FREE_URL` in `extension/lib/llm.js` and in the manifest's `host_permissions`; `ALLOWED_ORIGINS` in `server/wrangler.toml` lists the Store build's origin; add your unpacked build's `chrome-extension://<id>` if you test the free tier from it.
+  5. Put the Worker's URL in `FREE_URL` in `extension/lib/llm.js` and in the manifest's `host_permissions`; `ALLOWED_ORIGINS` in `server/wrangler.toml` lists the Store build's origin and, for now, the maintainer's two unpacked development builds; for your own unpacked build add `chrome-extension://<id>` (shown on `chrome://extensions`).
 
   `npm run dev` runs it locally. Deploying is the owner's step.
 - **Store package:** `node tools/package.mjs` writes `dist/manga-mining-<version>.zip` (the `extension/` folder without `test/`, `node_modules/` and `package*.json`). `--out <dir>` changes the folder.
