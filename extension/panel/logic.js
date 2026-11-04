@@ -116,6 +116,9 @@ export function deckForCard(decks, origin, checked) {
   return (origin && decks?.[origin]) || decks?._last || null;
 }
 
+// Whether the deck in force differs from the last one announced to the entries on screen (null: none).
+export const deckChanged = (announced, deck) => (announced ?? null) !== (deck ?? null);
+
 // Overlapping async calls: each next() gets an isCurrent() that turns false once a newer call started.
 export function latestCall() {
   let n = 0;

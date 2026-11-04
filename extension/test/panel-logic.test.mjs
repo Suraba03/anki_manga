@@ -17,6 +17,7 @@ import {
   resolveDeck,
   deckForCard,
   latestCall,
+  deckChanged,
   deckTargetText,
   DEFAULT_DECK,
   NO_DECK,
@@ -260,6 +261,20 @@ test("deckForCard: the last successful check decides for this site; without one,
   assert.equal(deckForCard(decks, "https://a.example", null), "Site");
   assert.equal(deckForCard({ _last: "Last" }, "https://b.example", null), "Last");
   assert.equal(deckForCard({}, "https://b.example", null), null);
+});
+
+test("deckChanged: announced when the deck in force differs from the last one announced", () => {
+  let announced = null; // nothing announced yet
+  const load = (deck) => {
+    const fires = deckChanged(announced, deck);
+    if (fires) announced = deck;
+    return fires;
+  };
+  assert.equal(load(null), false, "first load, no deck: nothing to refresh");
+  assert.equal(load("manga mining"), true, "the user picks, confirms or creates a deck");
+  assert.equal(load("manga mining"), false, "the same deck again");
+  assert.equal(load("Japanese"), true, "a tab change to a site with another deck");
+  assert.equal(load(null), true, "the deck is gone");
 });
 
 test("latestCall: only the newest call is current", () => {

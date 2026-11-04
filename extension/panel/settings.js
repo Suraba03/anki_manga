@@ -1,6 +1,6 @@
 // The settings drawer: deck, explanation source (free / own key), text-recognition mode, delete data.
 import { getSettings, setSettings } from "../lib/settings.js";
-import { freeLeftText, ankiErrorMessage, ownKeyCheck, llmModeAfter, validateBaseUrl, resolveDeck, deckChoice, deckForCard, deckTargetText, latestCall, DEFAULT_DECK } from "./logic.js";
+import { freeLeftText, ankiErrorMessage, ownKeyCheck, llmModeAfter, validateBaseUrl, resolveDeck, deckChoice, deckForCard, deckTargetText, latestCall, deckChanged, DEFAULT_DECK } from "./logic.js";
 import { deckNames, createDeck, forgetKnown } from "./anki.js";
 import { engine } from "./engine.js";
 import { state } from "./state.js";
@@ -41,6 +41,7 @@ async function chooseDeck(deck) {
 export const DECK_CHANGED = "am:deck-changed";
 
 const nextDeckLoad = latestCall();
+let announcedDeck = null; // the deck the entries on screen were last told about (not state.deckChecked, which chooseDeck sets early)
 
 // userAction: true from the "Connect to Anki" button; events (tab changes) never re-ask after a denial.
 // Nothing is saved here: see resolveDeck and deckChoice. A deck is saved only when the user picks one, confirms or
@@ -54,7 +55,6 @@ export async function loadDecks({ userAction = false } = {}) {
     if (!isCurrent()) return;
     const { deck, missing } = resolveDeck(decks, state.origin, names);
     const choice = deckChoice(names, deck);
-    const before = state.deckChecked?.deck ?? null;
     state.deckChecked = { origin: state.origin, deck };
     $("anki-connect").hidden = true;
     const options = names.map((d) => new Option(d, d, false, d === choice.selected));
@@ -70,7 +70,10 @@ export async function loadDecks({ userAction = false } = {}) {
       : gone ? `${gone}Cards go to “${deck}”.`
       : "";
     await showDeckTarget();
-    if (before !== deck) document.dispatchEvent(new Event(DECK_CHANGED));
+    if (isCurrent() && deckChanged(announcedDeck, deck)) {
+      announcedDeck = deck;
+      document.dispatchEvent(new Event(DECK_CHANGED));
+    }
   } catch (e) {
     if (!isCurrent()) return;
     $("deck-state").textContent = ankiErrorMessage(e.kind || "anki_error", e.kind ? "" : e.message);
