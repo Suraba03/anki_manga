@@ -206,7 +206,7 @@ test("am:page checks image-host permission, then asks the engine to OCR (auto: i
   });
 });
 
-test("on-demand mode (setting or benchmark) asks for no prefetch OCR", async () => {
+test("the OCR scope follows perfMode and the measured mode, and is auto while the mode is unknown", async () => {
   reset();
   const send = await startWorker("ondemand");
   store.local.settings = { perfMode: "on-demand" };

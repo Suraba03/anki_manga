@@ -5,7 +5,7 @@ import { buildModelSets, ensureFiles, clearModels } from "../engine/models.js";
 import { configureOrt } from "../engine/runtime.js";
 import { startEngine } from "../engine/startup.js";
 import { busyReply } from "../engine/busy.js";
-import { pageGate, resolveScope, retireEngine } from "../engine/gate.js";
+import { pageGate, resolveScope, retireEngine, waitPrepared } from "../engine/gate.js";
 import { openStore } from "../engine/store.js";
 import { OcrScheduler } from "../engine/scheduler.js";
 import { createTokenizer } from "../lib/tokenizer.js";
@@ -50,11 +50,13 @@ async function probeAnki() {
 const MODEL_CACHE = "anki-manga-models";
 const MIN_SIDE = 400;
 const MIN_LONG_SIDE = 600;
+const PREPARE_WAIT_MS = 10000; // a page request waits this long for the warm-up before it is told to retry
 const PAGES_IN_MEMORY = 6; // decoded pages kept for on-demand OCR (about 7 MB each)
 
 let status = { state: "downloading", progress: 0 };
 let persistedProgress = -1;
 let engine = null;
+let preparing = null; // resolves to `prepared` (or null) when the engine's background work is done
 let prepared = null; // the benchmark once the engine's warm-up and speed check are done (pages wait for it)
 let store = null;
 let booting = null;
@@ -107,7 +109,7 @@ function loadManifest() {
 function boot() {
   booting ||= (async () => {
     engine = await retireEngine(engine); // a retry after a post-ready failure must not leak the old sessions
-    prepared = null;
+    prepared = preparing = null;
     setStatus({ state: "downloading", progress: 0 });
     try {
       store ||= await openStore(indexedDB);
@@ -126,8 +128,9 @@ function boot() {
         },
       });
       engine = started.engine;
-      started.settled.then((r) => {
+      preparing = started.settled.then((r) => {
         if (engine === started.engine && !r.error) prepared = r.benchmark;
+        return prepared;
       });
     } catch (e) {
       console.error("engine start failed", e);
@@ -205,7 +208,12 @@ async function enginePage(msg) {
     boot(); // every page request after a failure tries again
     if (err !== "models_cleared") return { ok: false, error: "engine_error" };
   }
-  const busy = pageGate(status, prepared);
+  let busy = pageGate(status, prepared);
+  if (busy && status.state === "ready" && preparing) {
+    await waitPrepared(preparing, PREPARE_WAIT_MS); // a short wait saves the content script's retry delay
+    if (status.state === "error") return { ok: false, error: "engine_error" };
+    busy = pageGate(status, prepared);
+  }
   if (busy) return busy;
   const { mode } = prepared;
 

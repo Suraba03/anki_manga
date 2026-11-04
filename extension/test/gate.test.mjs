@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ocrScopeFor, resolveScope, pageGate, retireEngine } from "../engine/gate.js";
+import { ocrScopeFor, resolveScope, pageGate, retireEngine, waitPrepared } from "../engine/gate.js";
 
 test("ocrScopeFor: an explicit perfMode decides by itself", () => {
   for (const mode of [undefined, "prefetch", "on-demand"]) {
@@ -44,4 +44,19 @@ test("retireEngine: disposes the old engine and returns null; a failing dispose 
     null,
   );
   assert.deepEqual(errors, ["boom"]);
+});
+
+test("waitPrepared: resolves with the benchmark when it arrives in time", async () => {
+  const bench = { mode: "prefetch" };
+  assert.equal(await waitPrepared(new Promise((r) => setTimeout(() => r(bench), 5)), 500), bench);
+});
+
+test("waitPrepared: null after the timeout, without waiting for the promise", async () => {
+  const t0 = Date.now();
+  assert.equal(await waitPrepared(new Promise(() => {}), 20), null);
+  assert.ok(Date.now() - t0 < 400);
+});
+
+test("waitPrepared: a rejected promise gives null, not a throw", async () => {
+  assert.equal(await waitPrepared(Promise.reject(new Error("boom")), 500), null);
 });

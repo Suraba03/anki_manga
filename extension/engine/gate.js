@@ -32,3 +32,17 @@ export async function retireEngine(engine, onError = (e) => console.error("engin
   }
   return null;
 }
+
+// Waits for the engine's preparation (a promise of the benchmark, or of null/an error) for at most ms. Resolves the
+// benchmark, or null on a timeout or a failure; never throws.
+export async function waitPrepared(preparing, ms) {
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(resolve, ms, null);
+  });
+  try {
+    return (await Promise.race([Promise.resolve(preparing).catch(() => null), timeout])) ?? null;
+  } finally {
+    clearTimeout(timer);
+  }
+}

@@ -41,6 +41,7 @@ export function isRefusal(content, finishReason) {
   if (finishReason === "content_filter") return true;
   if (finishReason === "length" || typeof content !== "string") return false;
   const text = content.trim();
+  // On purpose: content containing "{" is JSON with text around it, so a format failure (bad_response), not a refusal.
   return text !== "" && !/^[[`]/.test(text) && !text.includes("{");
 }
 
