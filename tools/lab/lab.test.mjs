@@ -98,9 +98,18 @@ test("diff: no previous run, or a site not in it, gives no changes", () => {
   assert.deepEqual(diffRuns(run([]), run([site("s1", { open: false })])), []);
 });
 
-test("diff: ✓ → – (not reached any more) is a regression too", () => {
+test("diff: ✓ → – is a change, not a regression (not applicable this time, or after an earlier ✓ → ✗)", () => {
   const d = diffRuns(run([site("s1", { card: true })]), run([site("s1", { card: null })]));
-  assert.deepEqual(d, [{ site: "s1", step: "card", from: "✓", to: "–", regression: true }]);
+  assert.deepEqual(d, [{ site: "s1", step: "card", from: "✓", to: "–", regression: false }]);
+  assert.equal(regressed(d), false);
+});
+
+test("diff: a site that newly ends in an error (a timeout) is a regression; one that stops erring is not", () => {
+  const ok = site("s1", { open: true });
+  const failed = { ...site("s1", { open: true }), error: "site took over 240 s" };
+  assert.deepEqual(diffRuns(run([ok]), run([failed])), [{ site: "s1", step: "run", from: "ok", to: "error", regression: true }]);
+  assert.deepEqual(diffRuns(run([failed]), run([ok])), [{ site: "s1", step: "run", from: "error", to: "ok", regression: false }]);
+  assert.deepEqual(diffRuns(run([failed]), run([failed])), []);
 });
 
 test("markdown: one row per site with every step, the notes of failures, and the diff", () => {

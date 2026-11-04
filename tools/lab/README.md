@@ -33,8 +33,9 @@ messages or PRs.
 
 `tools/.cache/lab/runs/<stamp>-lane<offset>[-name]/`: `report.md`, `report.json`, and screenshots per site (the page at
 the first click, the panel, the page after scrolling). The report ends with the changes against this lane's previous
-run. The exit code is 1 when a step that passed last time does not pass now (✓ → ✗ or ✓ → –), when the run itself
-fails, or when a blocked request was attempted.
+run. The exit code is 1 when a step that passed last time fails now (✓ → ✗), when a site newly ends in an error (a
+timeout), when the run itself fails, or when a blocked request was attempted. ✓ → – is listed but does not count: the
+step did not apply this time (a line without kanji), or an earlier step's ✓ → ✗ already counts.
 
 ## Options
 

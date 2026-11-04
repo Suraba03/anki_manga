@@ -5,7 +5,9 @@ export const STEPS = ["open", "found", "bubbles", "text", "furigana", "explanati
 
 export const mark = (step) => (step?.ok === true ? "✓" : step?.ok === false ? "✗" : "–");
 
-// Changes between two runs, per site present in both. Losing a ✓ (to ✗ or to "not reached") is a regression.
+// Changes between two runs, per site present in both. A regression is a step that passed and now fails (✓ → ✗), or
+// a site that now ends in an error (a timeout). ✓ → – is listed but is not one: the step did not apply this time
+// (a line without kanji), or it was not reached because an earlier step went ✓ → ✗, which already counts.
 export function diffRuns(prev, cur) {
   if (!prev) return [];
   const before = new Map(prev.sites.map((s) => [s.name, s]));
@@ -13,10 +15,11 @@ export function diffRuns(prev, cur) {
   for (const s of cur.sites) {
     const p = before.get(s.name);
     if (!p) continue;
+    if (!!p.error !== !!s.error) out.push({ site: s.name, step: "run", from: p.error ? "error" : "ok", to: s.error ? "error" : "ok", regression: !!s.error });
     for (const step of STEPS) {
       const from = mark(p.steps?.[step]);
       const to = mark(s.steps?.[step]);
-      if (from !== to) out.push({ site: s.name, step, from, to, regression: from === "✓" });
+      if (from !== to) out.push({ site: s.name, step, from, to, regression: from === "✓" && to === "✗" });
     }
   }
   return out;
