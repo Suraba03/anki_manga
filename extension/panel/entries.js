@@ -229,11 +229,12 @@ export async function explainSelection(sel) {
     cause = d;
     console.warn("[anki_manga] explanation failed:", d);
   };
-  const r = await explain(ctx.text, { settings: await getSettings(), store: await store(), fetch: (...a) => fetch(...a), freeUrl: FREE_URL, onError });
+  const settings = await getSettings();
+  const r = await explain(ctx.text, { settings, store: await store(), fetch: (...a) => fetch(...a), freeUrl: FREE_URL, onError });
   tr.classList.remove("skeleton");
   if (!r.ok) {
     tr.textContent = "";
-    const { text, action } = explainErrorMessage(r.error);
+    const { text, action } = explainErrorMessage(r.error, { free: settings.llm.mode !== "own" });
     addMsg(el, text, action);
     if (cause) addDetail(el, cause);
     const left = freeRemainingAfterError(r.error);

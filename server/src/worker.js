@@ -37,8 +37,11 @@ export async function callDeepSeek(text, { apiKey, model = DEFAULT_MODEL, fetch:
       throw Object.assign(new Error("DeepSeek: unreadable body"), { paid: true });
     }
     const content = data?.choices?.[0]?.message?.content;
+    const finishReason = data?.choices?.[0]?.finish_reason ?? null;
+    // A content_filter stop may come without content: it is an answer (a refusal), not a broken payload.
+    if (finishReason === "content_filter" && content == null) return { result: "", usage: data.usage, finishReason };
     if (typeof content !== "string") throw Object.assign(new Error("DeepSeek: no content"), { paid: true, usage: data?.usage });
-    return { result: content, usage: data.usage, finishReason: data.choices[0].finish_reason ?? null };
+    return { result: content, usage: data.usage, finishReason };
   } finally {
     clearTimeout(timer);
   }

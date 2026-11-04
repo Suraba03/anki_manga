@@ -181,3 +181,13 @@ test("a card added just now reads as success; one already in the deck stays quie
   assert.deepEqual(cardDoneState("added"), { label: "✓ added", cls: "added" });
   assert.deepEqual(cardDoneState("in_deck"), { label: "✓ in deck", cls: "have" });
 });
+
+test("a declined line: neutral message, no retry, and the free counter is left alone", () => {
+  const own = explainErrorMessage("refused");
+  assert.deepEqual(own, { text: "No explanation for this line: the model declined it. The text, readings and dictionary still work.", action: null });
+  const free = explainErrorMessage("refused", { free: true });
+  assert.equal(free.action, null);
+  assert.equal(free.text, `${own.text} It did not count toward your free limit.`);
+  assert.equal(explainErrorMessage("free_daily_limit", { free: true }).text, explainErrorMessage("free_daily_limit").text, "other codes ignore the mode");
+  assert.equal(freeRemainingAfterError("refused"), null);
+});

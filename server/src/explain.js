@@ -1,6 +1,6 @@
 // Pure request logic of the free tier: validation, quotas, spend cap, shared cache.
 // No I/O of its own: the db, the LLM call, the clock and the IP hash are passed in.
-import { PROMPT_VERSION, SYSTEM_PROMPT, parseExplanation } from "../../extension/lib/prompt.js";
+import { PROMPT_VERSION, SYSTEM_PROMPT, parseExplanation, isRefusal } from "../../extension/lib/prompt.js";
 
 export const MAX_TEXT_CHARS = 300;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -28,8 +28,8 @@ export async function explanationKey(text) {
 
 const ANY_EXTENSION = "chrome-extension://*";
 
-// origin: the Origin request header or null. Entries are exact origins, except the single
-// wildcard "chrome-extension://*" (any extension, until the Web Store ID is known).
+// origin: the Origin request header or null. Entries are exact origins (wrangler.toml lists the Web Store
+// build), except the single wildcard "chrome-extension://*" (any extension; local experiments only).
 export function originAllowed(origin, config) {
   if (!origin) return config.ALLOW_NO_ORIGIN === "1";
   return config.ALLOWED_ORIGINS.split(",")
@@ -115,9 +115,15 @@ export async function handleExplain(body, { db, callLlm, now, ipHash, origin, co
     result = parseExplanation(out?.result);
   } catch (e) {
     const len = typeof out?.result === "string" ? out.result.trim().length : -1;
-    console.error("free tier: LLM answer rejected:", describeError(e), `finish_reason=${out?.finishReason ?? "?"} content_chars=${len}`);
+    // A refusal (the model declined the line) is final: a retry gets the same answer, so it has its own code.
+    const refused = isRefusal(out?.result, out?.finishReason);
+    console.error(
+      `free tier: LLM answer ${refused ? "refused" : "rejected"}:`,
+      describeError(e),
+      `finish_reason=${out?.finishReason ?? "?"} content_chars=${len}`,
+    );
     await charge(out?.usage); // paid, but no quota use and nothing cached
-    return err(502, "free_unavailable");
+    return refused ? err(422, "explanation_refused") : err(502, "free_unavailable");
   }
 
   await charge(out.usage);

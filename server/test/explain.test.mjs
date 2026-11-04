@@ -32,6 +32,7 @@ const PARSED = {
   notes: [{ focus: "こんにちは", explanation: "A greeting." }],
   suggestions: [{ word: "挨拶", reading: "あいさつ", meaning: "greeting" }],
 };
+const CUT = '{"translation": "Hel'; // a cut answer: unparseable, but not a refusal
 const USAGE = { prompt_cache_hit_tokens: 10, prompt_cache_miss_tokens: 20, completion_tokens: 30 };
 const COST = 10 * CONFIG.PRICE_IN_HIT + 20 * CONFIG.PRICE_IN_MISS + 30 * CONFIG.PRICE_OUT;
 
@@ -269,7 +270,7 @@ test("an LLM failure is 502 free_unavailable with nothing cached or counted", as
 
 test("an unparseable LLM answer is 502 free_unavailable with nothing cached or counted against quotas", async () => {
   // Its spend is charged (see the "paid but unparseable" test): the call was billed.
-  const { db, ctx } = setup({ callLlm: async () => ({ result: "not json", usage: USAGE }) });
+  const { db, ctx } = setup({ callLlm: async () => ({ result: CUT, usage: USAGE, finishReason: "length" }) });
   const r = await handleExplain(body(), ctx);
   assert.equal(r.status, 502);
   assert.equal(r.json.error, "free_unavailable");
@@ -362,7 +363,7 @@ test("usage with only the output count charges the estimate for the input side",
 });
 
 test("a paid but unparseable answer adds its spend, but no quota and no cache, and is 502", async () => {
-  const { db, ctx } = setup({ callLlm: async () => ({ result: "not json", usage: USAGE }) });
+  const { db, ctx } = setup({ callLlm: async () => ({ result: CUT, usage: USAGE, finishReason: "length" }) });
   const r = await handleExplain(body(), ctx);
   assert.equal(r.status, 502);
   assert.equal(r.json.error, "free_unavailable");
@@ -373,7 +374,7 @@ test("a paid but unparseable answer adds its spend, but no quota and no cache, a
 });
 
 test("a paid unparseable answer without usage is charged the estimate", async () => {
-  const { db, ctx } = setup({ callLlm: async () => ({ result: "not json" }) });
+  const { db, ctx } = setup({ callLlm: async () => ({ result: CUT, finishReason: "length" }) });
   assert.equal((await handleExplain(body(), ctx)).status, 502);
   assert.ok(Math.abs((await db.getSpend(MONTH)) - estimateCost("こんにちは")) < 1e-12);
 });
@@ -392,7 +393,7 @@ test("a callLlm failure flagged as paid (HTTP 200, unreadable payload) is charge
 test("a paid unparseable answer that crosses 80% of the cap still warns", async () => {
   const warn = mock.method(console, "warn", () => {});
   try {
-    const { db, ctx } = setup({ callLlm: async () => ({ result: "not json", usage: USAGE }) });
+    const { db, ctx } = setup({ callLlm: async () => ({ result: CUT, usage: USAGE, finishReason: "length" }) });
     db.spend.set(MONTH, 7.99);
     await handleExplain(body(), { ...ctx, config: { ...CONFIG, PRICE_OUT: 0.001 } });
     assert.equal(warn.mock.callCount(), 1);
@@ -444,4 +445,45 @@ test("an LLM failure logs a short cause and nothing secret", async () => {
   for (const secret of ["SECRETKEY", text, "203.0.113.9", "iphash-secret", ID]) assert.ok(!logged.includes(secret), secret);
   assert.match(logged, /Error/);
   assert.match(logged, /500/);
+});
+
+// ---- the model declined the line ----
+
+test("prose instead of JSON is 422 explanation_refused: spend charged, no quota, nothing cached", async () => {
+  const { db, ctx } = setup({ callLlm: async () => ({ result: "I can't help with that.", usage: USAGE, finishReason: "stop" }) });
+  const r = await handleExplain(body(), ctx);
+  assert.equal(r.status, 422);
+  assert.deepEqual(r.json, { error: "explanation_refused" });
+  assert.ok(Math.abs((await db.getSpend(MONTH)) - COST) < 1e-12);
+  assert.equal(db.cache.size, 0);
+  assert.equal(db.installs.size, 0);
+  assert.equal(db.ips.size, 0);
+});
+
+test("finish_reason content_filter is 422 explanation_refused even with empty content", async () => {
+  const { ctx } = setup({ callLlm: async () => ({ result: "", usage: USAGE, finishReason: "content_filter" }) });
+  const r = await handleExplain(body(), ctx);
+  assert.equal(r.status, 422);
+  assert.equal(r.json.error, "explanation_refused");
+});
+
+test("a cut, empty or fenced answer stays 502 free_unavailable", async () => {
+  for (const out of [
+    { result: CUT, finishReason: "length" },
+    { result: "", finishReason: "stop" },
+    { result: "```json\n{}\n```", finishReason: "stop" },
+  ]) {
+    const { ctx } = setup({ callLlm: async () => ({ ...out, usage: USAGE }) });
+    const r = await handleExplain(body(), ctx);
+    assert.equal(r.status, 502, JSON.stringify(out));
+    assert.equal(r.json.error, "free_unavailable");
+  }
+});
+
+test("a refusal is logged by kind, without the model's text", async () => {
+  const { ctx } = setup({ callLlm: async () => ({ result: "SECRET-PROSE", usage: USAGE, finishReason: "stop" }) });
+  await handleExplain(body({ text: "SECRET-LINE" }), ctx);
+  const logged = errors.mock.calls.map((c) => c.arguments.join(" ")).join("\n");
+  assert.match(logged, /refused/);
+  assert.doesNotMatch(logged, /SECRET/);
 });
