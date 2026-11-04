@@ -226,6 +226,44 @@ test("createEngine: a failing call does not block later calls", async () => {
   assert.equal(await engine.ocr(page, { box: [0, 0, 32, 32] }), "");
 });
 
+test("createEngine: with a trace log, each call records queued (jobs ahead), start and end", async () => {
+  const f = fakeOrt();
+  const engine = await createEngine(f.ort, "wasm", { det: bytes(1), enc: bytes(2), dec: bytes(3), vocab: enc("a\nb") });
+  const page = { data: new Uint8ClampedArray(64 * 64 * 4).fill(255), width: 64, height: 64 };
+  globalThis.__amTrace = [];
+  try {
+    await Promise.all([engine.detect(page), engine.detect(page), engine.ocr(page, { box: [0, 0, 32, 32] })]);
+    const log = globalThis.__amTrace;
+    const queued = log.filter((m) => m.name.endsWith(":queued"));
+    assert.deepEqual(queued.map((m) => [m.name, m.ahead]), [["detect:queued", 0], ["detect:queued", 1], ["ocr:queued", 2]]);
+    assert.deepEqual(log.filter((m) => m.name.endsWith(":start")).map((m) => m.name), ["detect:start", "detect:start", "ocr:start"]);
+    assert.deepEqual(log.filter((m) => m.name.endsWith(":end")).map((m) => m.name), ["detect:end", "detect:end", "ocr:end"]);
+    const [q0, q1] = queued;
+    const [s0, s1] = log.filter((m) => m.name === "detect:start");
+    const e0 = log.find((m) => m.name === "detect:end");
+    assert.ok(s1.t >= e0.t, "the second detect starts after the first ends");
+    assert.ok(s1.t - q1.t >= s0.t - q0.t, "and waited for it");
+  } finally {
+    delete globalThis.__amTrace;
+  }
+});
+
+test("createEngine: a failing call still records its end and frees its place in the queue", async () => {
+  const f = fakeOrt();
+  const engine = await createEngine(f.ort, "wasm", { det: bytes(1), enc: bytes(2), dec: bytes(3), vocab: enc("a") });
+  const page = { data: new Uint8ClampedArray(64 * 64 * 4).fill(255), width: 64, height: 64 };
+  globalThis.__amTrace = [];
+  try {
+    await assert.rejects(engine.ocr(page, { box: [500, 500, 600, 600] }));
+    await engine.detect(page);
+    const log = globalThis.__amTrace;
+    assert.ok(log.some((m) => m.name === "ocr:end"));
+    assert.equal(log.find((m) => m.name === "detect:queued").ahead, 0);
+  } finally {
+    delete globalThis.__amTrace;
+  }
+});
+
 test("createEngine: failed session creation releases the ones that succeeded and rejects", async () => {
   const f = fakeOrt({ failOnByte: 2 }); // encoder fails
   await assert.rejects(

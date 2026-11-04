@@ -153,3 +153,31 @@ test("pages are served in the order they were enqueued", async () => {
   await s.idle();
   assert.deepEqual(seen, ["a0", "a1", "b0", "b1"]);
 });
+
+test("with a trace log, every job records queued, start, end and sunk with its page and bubble", async () => {
+  const f = fakeOcr();
+  const s = new OcrScheduler(f.runOcr, () => {});
+  globalThis.__amTrace = [];
+  try {
+    s.enqueuePage("p", RGBA, mk(2));
+    await s.idle();
+    const log = globalThis.__amTrace;
+    assert.deepEqual(
+      log.map((m) => [m.name, m.pageId, m.bubbleId]),
+      [
+        ["bubble:queued", "p", 0], ["bubble:queued", "p", 1],
+        ["bubble:start", "p", 0], ["bubble:end", "p", 0], ["bubble:sunk", "p", 0],
+        ["bubble:start", "p", 1], ["bubble:end", "p", 1], ["bubble:sunk", "p", 1],
+      ],
+    );
+  } finally {
+    delete globalThis.__amTrace;
+  }
+});
+
+test("without a trace log the scheduler leaves no global behind", async () => {
+  const s = new OcrScheduler(fakeOcr().runOcr, () => {});
+  s.enqueuePage("p", RGBA, mk(1));
+  await s.idle();
+  assert.equal(globalThis.__amTrace, undefined);
+});

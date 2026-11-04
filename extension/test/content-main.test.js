@@ -38,7 +38,7 @@ function makeCanvas(rect = { left: 0, top: 0, width: 1000, height: 5000 }) {
 
 // replies: message type -> (msg) => reply. Returns the sandbox handles the tests need.
 // fetch: url -> truthy (a response) or throws; canvas: "ok" | "tainted" (what a canvas copy of an <img> gives).
-async function load({ imgs = [makeImg()], canvases = [], replies: given = {}, fetch: fetchImpl = () => { throw new TypeError("Failed to fetch"); }, canvas = "tainted", blobSize = 1000 } = {}) {
+async function load({ imgs = [makeImg()], canvases = [], replies: given = {}, fetch: fetchImpl = () => { throw new TypeError("Failed to fetch"); }, canvas = "tainted", blobSize = 1000, trace = false } = {}) {
   const replies = { "am:page": () => ({ ok: true, page: page([null]) }), ...given };
   const sent = [];
   const timers = [];
@@ -99,6 +99,8 @@ async function load({ imgs = [makeImg()], canvases = [], replies: given = {}, fe
     AnkiManga: { PageFinder, Overlay, Status },
     URL,
     Promise,
+    performance, // only read while the harness trace is on
+    ...(trace ? { __amTrace: [] } : {}),
     fetch: async (url) => {
       fetched.push(url);
       const resp = fetchImpl(url);
@@ -157,6 +159,7 @@ async function load({ imgs = [makeImg()], canvases = [], replies: given = {}, fe
   vm.runInContext(source, vm.createContext(sandbox));
   await flush();
   const env = {
+    log: sandbox.__amTrace,
     sent,
     handles,
     badges,
@@ -803,4 +806,52 @@ test("a small placeholder followed by a small real image: no badge, no host requ
   assert.equal(env.badges.get(img)?.state ?? null, null);
   assert.equal(env.ofType("am:missing-host").length, 0);
   assert.equal(env.probes().length + env.captures().length, 0);
+});
+
+// --- reading-speed trace (tools/perf): marks only while the harness has set globalThis.__amTrace ---------------------
+const IMG_URL = "https://cdn.example/p1.jpg";
+const names = (log, key) => log.filter((m) => !key || m.key === key).map((m) => m.name);
+
+test("trace: a page's marks run observed -> fetch -> send -> reply -> overlay -> badge, keyed by the image URL", async () => {
+  const env = await load({ trace: true, fetch: () => true, replies: { "am:page": () => ({ ok: true, page: page([null, null]) }) } });
+  await env.intersect(env.imgs[0], {});
+  const seq = names(env.log, IMG_URL);
+  for (const [a, b] of [["observed", "fetch:start"], ["fetch:start", "fetch:headers"], ["fetch:headers", "fetch:data"], ["fetch:data", "send"], ["send", "reply"], ["reply", "overlay"]]) {
+    assert.ok(seq.indexOf(a) >= 0 && seq.indexOf(b) > seq.indexOf(a), `${a} before ${b}: ${seq}`);
+  }
+  const send = env.log.find((m) => m.name === "send");
+  assert.equal(send.len, "data:image/png;fake,".length + IMG_URL.length, "the data URL length identifies the page in the offscreen log");
+  assert.equal(env.log.find((m) => m.name === "reply").ok, true);
+  const overlay = env.log.find((m) => m.name === "overlay");
+  assert.deepEqual(plain({ pageId: overlay.pageId, bubbles: overlay.bubbles, known: overlay.known }), { pageId: "P", bubbles: 2, known: [] });
+  assert.ok(env.log.every((m) => typeof m.t === "number"));
+});
+
+test("trace: badge states, bubble texts and the panel report are marked", async () => {
+  const env = await load({ trace: true, replies: { "am:page": () => ({ ok: true, page: page([null, null]) }) } });
+  await env.intersect(env.imgs[0], {});
+  await env.message({ type: "am:bubble-text", pageId: "P", bubbleId: 0, text: "あ" });
+  await env.message({ type: "am:bubble-text", pageId: "P", bubbleId: 1, text: "い" });
+  const badges = env.log.filter((m) => m.name === "badge" && m.key === IMG_URL).map((m) => [m.phase, m.done, m.total]);
+  assert.deepEqual(badges.slice(0, 2), [["detecting", undefined, undefined], ["ocr", 0, 2]]);
+  assert.deepEqual(badges.at(-1), ["ocr", 2, 2]);
+  assert.deepEqual(env.log.filter((m) => m.name === "text").map((m) => [m.pageId, m.bubbleId]), [["P", 0], ["P", 1]]);
+  await env.fire(300);
+  assert.equal(env.log.filter((m) => m.name === "report").length, 1);
+});
+
+test("trace: a failed reply is marked with ok: false and the error", async () => {
+  const env = await load({ trace: true, fetch: () => true, replies: { "am:page": () => ({ ok: false, error: "no_image_permission", host: "cdn.example" }) } });
+  await env.intersect(env.imgs[0], {});
+  const reply = env.log.find((m) => m.name === "reply");
+  assert.equal(reply.ok, false);
+  assert.equal(reply.error, "no_image_permission");
+});
+
+test("trace: without the harness flag nothing is recorded and no global appears", async () => {
+  const env = await load({ replies: { "am:page": () => ({ ok: true, page: page([null]) }) } });
+  await env.intersect(env.imgs[0], {});
+  await env.message({ type: "am:bubble-text", pageId: "P", bubbleId: 0, text: "あ" });
+  assert.equal(env.log, undefined);
+  assert.equal(env.ofType("am:page").length, 1);
 });

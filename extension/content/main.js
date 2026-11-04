@@ -32,6 +32,21 @@
     return chrome.runtime.sendMessage(msg).catch(() => ({ ok: false, error: "extension_reloaded" }));
   }
 
+  // Timing marks for the reading-speed harness (tools/perf): recorded only while the harness has set
+  // globalThis.__amTrace (this script's own world, over CDP); otherwise one property read. at: an <img> or a URL.
+  function trace(name, at, data) {
+    const log = globalThis.__amTrace;
+    if (!log) return;
+    let key;
+    try {
+      if (typeof at === "string") key = PageFinder.pageKey(at);
+      else if (at && at.tagName === "IMG") key = PageFinder.pageKey(PageFinder.realImageUrl(at));
+    } catch {
+      /* a mark without a key */
+    }
+    log.push({ t: performance.timeOrigin + performance.now(), name, key, ...data });
+  }
+
   // --- progress badges + panel summary ----------------------------------------------------
   const badges = new Map(); // page element -> badge
 
@@ -42,6 +57,7 @@
       b = Status.attachBadge(el);
       badges.set(el, b);
     }
+    trace("badge", el, state);
     b.set(state);
     reportSoon();
   }
@@ -62,7 +78,9 @@
           badges.delete(el);
         } else states.push(b.state);
       }
-      send({ type: "am:status", summary: Status.summary(states) });
+      const summary = Status.summary(states);
+      trace("report", null, summary);
+      send({ type: "am:status", summary });
     }, 300);
   }
 
@@ -87,6 +105,7 @@
     const prev = byImg.get(img);
     if (prev && prev.handle) prev.handle.destroy();
     const handle = Overlay.attach(img, page, overlayOpts);
+    trace("overlay", img, { pageId: page.page_id, bubbles: page.bubbles.length, known: page.bubbles.filter((b) => b.text).map((b) => b.id) });
     byImg.set(img, { key, handle });
     const list = (byPage.get(page.page_id) || []).filter((h) => h.img.isConnected && h.img !== img);
     list.push(handle);
@@ -122,11 +141,13 @@
     if ((u.protocol === "blob:" || u.protocol === "http:" || u.protocol === "https:") && (direct || !corsBlocked.has(u.host))) {
       // A fetch that throws (TypeError: network or CORS) is tried once more after a pause: a burst of lazy images
       // loading at once drops a few connections. Not on an HTTP error, which says nothing about the host or the network.
+      trace("fetch:start", url);
       let resp = await fetch(url).catch(() => null);
       if (!resp) {
         await new Promise((resolve) => setTimeout(resolve, FETCH_RETRY_MS));
         resp = await fetch(url).catch(() => null);
       }
+      trace("fetch:headers", url, { ok: !!resp && resp.ok });
       if (resp) fetchThrows.delete(u.host);
       else {
         // Failed twice. Two such images in a row block the host (a real CORS failure costs a console error per try).
@@ -136,6 +157,7 @@
       }
       try {
         if (resp && resp.ok) dataUrl = await toDataUrl(await resp.blob());
+        trace("fetch:data", url, { len: dataUrl && dataUrl.length });
       } catch {
         /* unreadable or too big: the next source */
       }
@@ -167,9 +189,11 @@
 
   async function loadPage(img, url) {
     const dataUrl = await pageBytes(img, url);
-    if (dataUrl) return send({ type: "am:page", imageUrl: url, dataUrl });
-    if (url.startsWith("blob:")) return { ok: false, error: "fetch_failed" }; // the worker can't open it
-    return send({ type: "am:page", imageUrl: url });
+    if (url.startsWith("blob:") && !dataUrl) return { ok: false, error: "fetch_failed" }; // the worker can't open it
+    trace("send", url, { len: dataUrl ? dataUrl.length : null });
+    const res = await send(dataUrl ? { type: "am:page", imageUrl: url, dataUrl } : { type: "am:page", imageUrl: url });
+    trace("reply", url, { ok: !!(res && res.ok), error: res && res.error });
+    return res;
   }
 
   async function processImage(img, attempt = 0) {
@@ -317,7 +341,10 @@
     return new IntersectionObserver(
       (entries) => {
         for (const e of entries) {
-          if (e.isIntersecting && startsHere(e, mode) && candidate(e.target)) processImage(e.target);
+          if (e.isIntersecting && startsHere(e, mode) && candidate(e.target)) {
+            trace("observed", e.target);
+            processImage(e.target);
+          }
         }
       },
       IO_OPTIONS[mode],
@@ -609,6 +636,7 @@
 
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.type === "am:bubble-text") {
+      trace("text", null, { pageId: msg.pageId, bubbleId: msg.bubbleId });
       for (const h of byPage.get(msg.pageId) || []) {
         h.setText(msg.bubbleId, msg.text);
         showProgress(h);

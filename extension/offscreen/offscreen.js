@@ -8,6 +8,7 @@ import { busyReply } from "../engine/busy.js";
 import { pageGate, resolveScope, retireEngine, waitPrepared } from "../engine/gate.js";
 import { openStore } from "../engine/store.js";
 import { OcrScheduler } from "../engine/scheduler.js";
+import { begin } from "../engine/trace.js";
 import { createTokenizer } from "../lib/tokenizer.js";
 import { bubbleReply } from "../engine/bubble.js";
 import { findPanelBox, cropJpeg } from "../engine/panel-crop.js";
@@ -206,6 +207,7 @@ async function rgbaFor(pageId) {
 
 
 async function enginePage(msg) {
+  const step = begin("page", { len: msg.source?.dataUrl?.length }); // timing marks, only for tools/perf
   if (status.state === "error") {
     const err = status.error;
     boot(); // every page request after a failure tries again
@@ -228,14 +230,19 @@ async function enginePage(msg) {
     throw e;
   }
   const { rgba, bytes } = img;
+  step("read");
   if (Math.min(rgba.width, rgba.height) < MIN_SIDE || Math.max(rgba.width, rgba.height) < MIN_LONG_SIDE) {
     return { ok: false, error: "not_manga" };
   }
   const pageId = await store.pageIdFor(bytes);
+  step("hashed", { pageId });
   let page = await store.getPage(pageId);
+  step("lookup", { cached: !!page });
   if (!page) {
     try {
+      step("detect-call");
       await store.savePage(pageId, rgba.width, rgba.height, await engine.detect(rgba));
+      step("detected");
     } catch (e) {
       console.error("detect failed", e);
       return { ok: false, error: "engine_error" };
@@ -243,8 +250,10 @@ async function enginePage(msg) {
     page = await store.getPage(pageId);
   }
   if (!(await store.loadImage(pageId))) await store.saveImage(pageId, bytes);
+  step("image");
   remember(pageId, rgba);
   if (resolveScope(msg.ocr, mode) === "all") scheduler.enqueuePage(pageId, rgba, page.bubbles);
+  step("reply");
   return { ok: true, page: { page_id: pageId, width: page.width, height: page.height, bubbles: page.bubbles } };
 }
 

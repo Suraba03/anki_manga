@@ -1,6 +1,8 @@
 // OCR queue (port of the helper's scheduler.py): bubbles in reading order, pages in arrival order,
 // hovered/clicked bubbles first. One bubble at a time: the ORT sessions are not re-entrant.
 
+import { mark } from "./trace.js";
+
 const NORMAL = 10;
 const URGENT = 0;
 
@@ -26,6 +28,7 @@ export class OcrScheduler {
       if (bubble.text != null || this.jobs.has(key)) continue;
       this.pages.set(pageId, rgba);
       this.jobs.set(key, { pageId, bubble, priority: NORMAL, seq: this.seq++ });
+      mark("bubble:queued", { pageId, bubbleId: bubble.id });
     }
     if (this.jobs.size && !this.running) this.running = this.drain();
   }
@@ -67,7 +70,9 @@ export class OcrScheduler {
       let text;
       let persist = true;
       try {
+        mark("bubble:start", { pageId, bubbleId: bubble.id });
         text = await this.runOcr(this.pages.get(pageId), bubble);
+        mark("bubble:end", { pageId, bubbleId: bubble.id });
       } catch {
         text = ""; // keep the queue alive; the bubble is done, but nothing is cached
         persist = false;
@@ -77,6 +82,7 @@ export class OcrScheduler {
       if (![...this.jobs.values()].some((j) => j.pageId === pageId)) this.pages.delete(pageId);
       try {
         await this.onText(pageId, bubble.id, text, persist);
+        mark("bubble:sunk", { pageId, bubbleId: bubble.id });
       } catch {
         /* a failing sink must not stop OCR */
       }

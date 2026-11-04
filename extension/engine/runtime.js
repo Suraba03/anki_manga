@@ -1,6 +1,7 @@
 // ORT session wiring: backend choice (WebGPU with WASM CPU fallback) and the engine object around detectPage/ocrBubble.
 import { detectPage } from "./detector.js";
 import { ocrBubble } from "./ocr.js";
+import { mark } from "./trace.js";
 
 export { runBenchmark } from "./benchmark.js";
 
@@ -62,8 +63,18 @@ export async function createEngine(ort, ep, files) {
 
   // One inference at a time: ORT web sessions are not re-entrant on WebGPU.
   let chain = Promise.resolve();
-  const serial = (fn) => {
-    const result = chain.then(fn);
+  let waiting = 0; // calls queued or running (the "ahead" of a new call, in the trace)
+  const serial = (fn, kind) => {
+    mark(`${kind}:queued`, { ahead: waiting++ });
+    const result = chain.then(async () => {
+      mark(`${kind}:start`);
+      try {
+        return await fn();
+      } finally {
+        waiting--;
+        mark(`${kind}:end`);
+      }
+    });
     chain = result.catch(() => {});
     return result;
   };
@@ -71,7 +82,7 @@ export async function createEngine(ort, ep, files) {
   return {
     ep,
     dispose: release,
-    detect: (rgba) => serial(() => detectPage(runModel, rgba)),
-    ocr: (rgba, bubble) => serial(() => ocrBubble(runEncoder, runDecoder, vocab, rgba, bubble)),
+    detect: (rgba) => serial(() => detectPage(runModel, rgba), "detect"),
+    ocr: (rgba, bubble) => serial(() => ocrBubble(runEncoder, runDecoder, vocab, rgba, bubble), "ocr"),
   };
 }
