@@ -15,7 +15,7 @@ Explanations are free up to 100 per day with no account, or use your own DeepSee
 
 ## Get it
 
-- Chrome Web Store: coming soon
+- [Install from the Chrome Web Store](https://chromewebstore.google.com/detail/bgfnpifeeclmpfdcahphaiahgafjppeo)
 - Try it: [a demo manga page](demo/) (an original drawing) to test the extension on
 - Source code, setup and troubleshooting: [github.com/Suraba03/anki_manga](https://github.com/Suraba03/anki_manga)
 
