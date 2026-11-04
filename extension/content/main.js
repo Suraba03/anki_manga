@@ -101,6 +101,7 @@
   const corsBlocked = new Set(); // hosts whose images this tab could not fetch (no CORS): one console error per host
   const fetchThrows = new Map(); // host -> fetches that threw since the last success (one network error is no CORS)
   const CORS_STRIKES = 2;
+  const FETCH_RETRY_MS = 500;
 
   function toDataUrl(blob) {
     if ((blob.size * 4) / 3 > MAX_DATA_URL) return Promise.reject(new Error("too big")); // base64 is 4/3 of the bytes
@@ -119,12 +120,16 @@
     const u = new URL(url);
     const direct = u.protocol === "blob:" || u.origin === location.origin;
     if ((u.protocol === "blob:" || u.protocol === "http:" || u.protocol === "https:") && (direct || !corsBlocked.has(u.host))) {
-      let resp = null;
-      try {
-        resp = await fetch(url);
-        fetchThrows.delete(u.host);
-      } catch {
-        // A TypeError: network or CORS. Twice in a row blocks the host (an HTTP error says nothing about it).
+      // A fetch that throws (TypeError: network or CORS) is tried once more after a pause: a burst of lazy images
+      // loading at once drops a few connections. Not on an HTTP error, which says nothing about the host or the network.
+      let resp = await fetch(url).catch(() => null);
+      if (!resp) {
+        await new Promise((resolve) => setTimeout(resolve, FETCH_RETRY_MS));
+        resp = await fetch(url).catch(() => null);
+      }
+      if (resp) fetchThrows.delete(u.host);
+      else {
+        // Failed twice. Two such images in a row block the host (a real CORS failure costs a console error per try).
         const strikes = (fetchThrows.get(u.host) || 0) + 1;
         fetchThrows.set(u.host, strikes);
         if (!direct && strikes >= CORS_STRIKES) corsBlocked.add(u.host);
@@ -233,9 +238,10 @@
     }, delay);
   }
 
-  // The <img> shows its real image (not a lazy placeholder) and the size is known.
+  // The <img> shows its real image (not a lazy placeholder, not the previous page) and the size is known.
   function isShown(img) {
-    return img.complete && img.naturalWidth > 1 && !img.src.startsWith("data:");
+    const url = PageFinder.realImageUrl(img);
+    return !!url && img.complete && img.naturalWidth > 1 && !img.src.startsWith("data:") && shows(img, url);
   }
 
   // Lazy readers show a placeholder first; draw only once the real image is laid out. One promise per image, so

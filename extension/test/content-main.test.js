@@ -133,7 +133,9 @@ async function load({ imgs = [makeImg()], canvases = [], replies: given = {}, fe
     ResizeObserver: class { observe() {} },
     requestAnimationFrame: (fn) => fn(),
     setTimeout: (fn, ms) => {
-      timers.push({ fn, ms });
+      // the fetch retry pause runs at once (a test would only wait for it); it stays in the log
+      timers.push({ fn, ms, done: ms === 500 });
+      if (ms === 500) Promise.resolve().then(fn);
       return timers.length;
     },
     clearTimeout: (id) => {
@@ -160,6 +162,7 @@ async function load({ imgs = [makeImg()], canvases = [], replies: given = {}, fe
     badges,
     imgs,
     fetched,
+    timerDelays: () => timers.map((t) => t.ms),
     observeLog,
     mutate: async (records) => {
       for (const cb of mutationCallbacks) cb(records);
@@ -403,29 +406,53 @@ test("a blob: image is never sent to the worker as a URL; when its bytes can't b
   assert.equal(bad.captures().length, 1, "falls back to a screenshot");
 });
 
-test("a CDN image is fetched too; after two failures in a row the host is not fetched again in this tab", async () => {
+const dead = () => { throw new TypeError("CORS"); };
+
+test("a CDN image is fetched too; a thrown fetch is retried once, and after two failed images the host is not fetched again", async () => {
   const urls = ["https://cdn.example/1.jpg", "https://cdn.example/2.jpg", "https://cdn.example/3.jpg"];
   const imgs = urls.map((u) => makeImg(u));
   const other = makeImg("https://other.example/4.jpg");
-  const env = await load({ imgs: [...imgs, other], fetch: (url) => { if (url.includes("cdn.example")) throw new TypeError("CORS"); return true; } });
+  const env = await load({ imgs: [...imgs, other], fetch: (url) => (url.includes("cdn.example") ? dead() : true) });
   for (const img of [...imgs, other]) await env.intersect(img, {});
-  assert.deepEqual(env.fetched, [urls[0], urls[1], "https://other.example/4.jpg"], "the third image of the host skips the fetch");
+  assert.deepEqual(env.fetched, [urls[0], urls[0], urls[1], urls[1], "https://other.example/4.jpg"], "the third image of the host skips the fetch");
   assert.deepEqual(env.ofType("am:page").map((m) => !!m.dataUrl), [false, false, false, true]);
 });
 
-test("one network error does not block a host; a success in between resets the count", async () => {
-  let fail = new Set(["1", "3"]);
-  const imgs = [1, 2, 3, 4, 5].map((n) => makeImg(`https://cdn.example/${n}.jpg`));
-  const env = await load({ imgs, fetch: (url) => { if (fail.has(url.match(/(\d)\.jpg/)[1])) throw new TypeError("net"); return true; } });
+test("a fetch that throws is retried once after 500 ms; when the retry works the bytes are sent and no URL request follows", async () => {
+  const seen = new Set();
+  const env = await load({ imgs: [makeImg("https://cdn.example/1.jpg")], fetch: (url) => (seen.has(url) ? true : (seen.add(url), dead())) });
+  await env.intersect(env.imgs[0], {});
+  assert.equal(env.fetched.length, 2);
+  assert.ok(env.timerDelays().includes(500));
+  assert.deepEqual(env.ofType("am:page").map((m) => !!m.dataUrl), [true]);
+});
+
+test("a fetch that throws twice falls back as before (canvas, then the URL)", async () => {
+  const env = await load({ imgs: [makeImg(SAME)], fetch: dead, canvas: "ok" });
+  await env.intersect(env.imgs[0], {});
+  assert.equal(env.fetched.length, 2);
+  assert.equal(env.ofType("am:page")[0].dataUrl, fake("canvas"));
+  const bare = await load({ imgs: [makeImg(SAME)], fetch: dead });
+  await bare.intersect(bare.imgs[0], {});
+  assert.deepEqual(plain(bare.ofType("am:page")), [{ type: "am:page", imageUrl: SAME }]);
+});
+
+test("a failure is a fetch that threw on both tries; a success in between resets the count", async () => {
+  const seen = new Set();
+  const flaky = (url) => (seen.has(url) ? true : (seen.add(url), dead()));
+  const kinds = { 1: dead, 2: () => true, 3: dead, 4: flaky, 5: dead, 6: () => true };
+  const imgs = [1, 2, 3, 4, 5, 6].map((n) => makeImg(`https://cdn.example/${n}.jpg`));
+  const env = await load({ imgs, fetch: (url) => kinds[url.match(/(\d)\.jpg/)[1]](url) });
   for (const img of imgs) await env.intersect(img, {});
-  assert.equal(env.fetched.length, 5, "fail, ok, fail, ok, ok: never two failures in a row");
-  fail = new Set(["6", "7"]);
-  for (const n of [6, 7, 8]) {
+  // dead (2 calls), ok, dead (2), flaky (2), dead (2), ok: never two failed images in a row
+  assert.equal(env.fetched.length, 10);
+  for (const n of [7, 8, 9]) {
+    kinds[n] = dead;
     const img = makeImg(`https://cdn.example/${n}.jpg`);
     env.imgs.push(img);
     await env.intersect(img, {});
   }
-  assert.equal(env.fetched.length, 7, "two in a row: the host is blocked, the eighth is not fetched");
+  assert.equal(env.fetched.length, 14, "7 and 8 fail twice in a row: the host is blocked and 9 is not fetched");
 });
 
 test("an HTTP error from a CDN host does not stop the content script from fetching its next image", async () => {
@@ -461,7 +488,7 @@ const placeholder = (extra = {}) => {
   });
   // the browser finished loading the real image
   img.loaded = async (w, h) => {
-    Object.assign(img, { src: "https://cdn.example/lazy.jpg", complete: true, naturalWidth: w, naturalHeight: h });
+    Object.assign(img, { src: "https://cdn.example/lazy.jpg", currentSrc: "https://cdn.example/lazy.jpg", complete: true, naturalWidth: w, naturalHeight: h });
     for (const fn of [...listeners]) fn();
     await flush();
   };
@@ -704,4 +731,38 @@ test("an image waiting for host permission or for a retry is not started again b
     await env.mutate([{ type: "attributes", target: img }]);
     assert.equal(env.observeLog.filter((e) => e === img).length, before, img.src);
   }
+});
+
+// --- a same-origin placeholder is not the real image --------------------------------------------------------------
+// A lazy reader's <img>: its src is a placeholder image of the site until the real page is set.
+const lazyPlaceholder = (w, h) =>
+  placeholder({ src: "https://reader.example/placeholder.png", currentSrc: "https://reader.example/placeholder.png", complete: true, naturalWidth: w, naturalHeight: h });
+
+test("a manga-sized placeholder is not the real image: no badge until the page is laid out; then the page is drawn", async () => {
+  const img = lazyPlaceholder(600, 860);
+  const env = await load({ imgs: [img], replies: { "am:page": () => ({ ok: true, page: page([null]) }) } });
+  await env.intersect(img, {});
+  assert.equal(env.ofType("am:page").length, 1);
+  assert.equal(env.badges.get(img), undefined, "no 'finding bubbles' for the placeholder");
+  assert.equal(env.handles.length, 0);
+  await img.loaded(800, 1200);
+  assert.equal(env.handles.length, 1);
+  assert.deepEqual(plain(env.badges.get(img).state), { phase: "ocr", done: 0, total: 1 });
+});
+
+test("a small placeholder does not make the image a non-candidate", async () => {
+  const img = lazyPlaceholder(100, 100);
+  const env = await load({ imgs: [img] });
+  await env.intersect(img, {});
+  assert.equal(env.ofType("am:page").length, 1, "the real image is on its way, whatever the placeholder looks like");
+});
+
+test("a small placeholder followed by a small real image: no badge, no host request, no screenshot", async () => {
+  const img = lazyPlaceholder(100, 100);
+  const env = await load({ imgs: [img], replies: noPermission });
+  await env.intersect(img, {});
+  await img.loaded(300, 250);
+  assert.equal(env.badges.get(img)?.state ?? null, null);
+  assert.equal(env.ofType("am:missing-host").length, 0);
+  assert.equal(env.probes().length + env.captures().length, 0);
 });
