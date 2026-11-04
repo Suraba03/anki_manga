@@ -738,16 +738,54 @@ test("an image waiting for host permission or for a retry is not started again b
 const lazyPlaceholder = (w, h) =>
   placeholder({ src: "https://reader.example/placeholder.png", currentSrc: "https://reader.example/placeholder.png", complete: true, naturalWidth: w, naturalHeight: h });
 
-test("a manga-sized placeholder is not the real image: no badge until the page is laid out; then the page is drawn", async () => {
+test("a manga-sized placeholder is not the real image: no 'finding bubbles' while it is shown; after an error, no badge before the swap", async () => {
+  const img = lazyPlaceholder(600, 860);
+  const env = await load({ imgs: [img], replies: noPermission });
+  await env.intersect(img, {});
+  assert.equal(env.ofType("am:page").length, 1);
+  assert.equal(env.badges.get(img), undefined, "nothing for the placeholder");
+  assert.equal(env.ofType("am:missing-host").length, 0);
+  await img.loaded(800, 1200);
+  assert.deepEqual(plain(env.badges.get(img).state), { phase: "error", error: "no_image_permission" });
+  assert.equal(env.ofType("am:missing-host").length, 1);
+});
+
+test("a success is drawn as soon as the image is laid out, whatever it shows", async () => {
   const img = lazyPlaceholder(600, 860);
   const env = await load({ imgs: [img], replies: { "am:page": () => ({ ok: true, page: page([null]) }) } });
   await env.intersect(img, {});
+  assert.equal(env.handles.length, 1, "the engine read the real bytes");
   assert.equal(env.ofType("am:page").length, 1);
-  assert.equal(env.badges.get(img), undefined, "no 'finding bubbles' for the placeholder");
-  assert.equal(env.handles.length, 0);
-  await img.loaded(800, 1200);
+});
+
+// A reader that leaves src at a resized image for good: it never equals data-src.
+const resized = (w, h) => placeholder({ src: "https://reader.example/resized.jpg", currentSrc: "https://reader.example/resized.jpg", complete: true, naturalWidth: w, naturalHeight: h });
+
+test("an <img> whose src differs from data-src for good: a success still draws the overlay", async () => {
+  const img = resized(800, 1200);
+  const env = await load({ imgs: [img], replies: { "am:page": () => ({ ok: true, page: page([null]) }) } });
+  await env.intersect(img, {});
   assert.equal(env.handles.length, 1);
-  assert.deepEqual(plain(env.badges.get(img).state), { phase: "ocr", done: 0, total: 1 });
+});
+
+test("an <img> whose src differs from data-src for good: after an error, 3 s later a manga-sized src gets the badge", async () => {
+  const img = resized(800, 1200);
+  const env = await load({ imgs: [img], replies: noPermission });
+  await env.intersect(img, {});
+  assert.equal(env.badges.get(img), undefined, "waiting for a load event");
+  await env.fire(3000);
+  assert.deepEqual(plain(env.badges.get(img).state), { phase: "error", error: "no_image_permission" });
+  assert.equal(env.ofType("am:missing-host").length, 1);
+});
+
+test("an <img> whose src differs from data-src for good: after an error, a small src is dropped silently", async () => {
+  const img = resized(300, 250);
+  const env = await load({ imgs: [img], replies: noPermission });
+  await env.intersect(img, {});
+  await env.fire(3000);
+  assert.equal(env.badges.get(img)?.state ?? null, null);
+  assert.equal(env.ofType("am:missing-host").length, 0);
+  assert.equal(env.probes().length + env.captures().length, 0);
 });
 
 test("a small placeholder does not make the image a non-candidate", async () => {

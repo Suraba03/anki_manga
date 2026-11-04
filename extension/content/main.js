@@ -192,13 +192,13 @@
     if (res && res.ok) {
       waitingPermission.delete(img);
       engineFailures.delete(img);
-      await whenDisplayed(img);
+      await whenLaidOut(img); // the engine read the real bytes: it does not matter which pixels the <img> shows now
       if (byImg.get(img) && byImg.get(img).key === key) showPage(img, key, res.page);
       return;
     }
     // An error of an image whose size is not known yet waits for it: a small one is no page, so no badge, no host
     // request, no screenshot.
-    await whenDisplayed(img);
+    await whenSized(img);
     if (!byImg.get(img) || byImg.get(img).key !== key) return; // swapped to another page meanwhile
     if (!PageFinder.isMangaElement(img)) {
       byImg.set(img, { key, handle: null, failed: "not_manga" });
@@ -244,19 +244,25 @@
     return !!url && img.complete && img.naturalWidth > 1 && !img.src.startsWith("data:") && shows(img, url);
   }
 
-  // Lazy readers show a placeholder first; draw only once the real image is laid out. One promise per image, so
-  // retries don't stack listeners; forgotten when the reader swaps the src.
-  const displayWaits = new WeakMap();
-  function whenDisplayed(img) {
-    if (isShown(img)) return Promise.resolve();
-    if (!displayWaits.has(img)) {
-      displayWaits.set(
+  // The <img> has pixels (maybe a placeholder or a resized copy), whichever URL they came from.
+  function isLaidOut(img) {
+    return img.complete && img.naturalWidth > 1 && !img.src.startsWith("data:");
+  }
+
+  // Lazy readers show a placeholder first. One promise per image and condition, so retries don't stack listeners;
+  // forgotten when the reader swaps the src.
+  const SIZE_SETTLE_MS = 3000;
+  const laidOutWaits = new WeakMap();
+  function whenIs(img, ready, memo) {
+    if (ready(img)) return Promise.resolve();
+    if (!memo.has(img)) {
+      memo.set(
         img,
         new Promise((resolve) => {
           const done = () => {
-            if (isShown(img)) {
+            if (ready(img)) {
               img.removeEventListener("load", done);
-              displayWaits.delete(img);
+              memo.delete(img);
               resolve();
             }
           };
@@ -264,7 +270,24 @@
         }),
       );
     }
-    return displayWaits.get(img);
+    return memo.get(img);
+  }
+  const whenLaidOut = (img) => whenIs(img, isLaidOut, laidOutWaits);
+
+  // The size to judge by: of the real image. An <img> that keeps showing another URL for good (a resized src with the
+  // original in data-src) never gets there, so after its next load event or 3 s the laid-out size is used.
+  async function whenSized(img) {
+    if (isShown(img)) return;
+    await whenLaidOut(img);
+    if (isShown(img)) return;
+    await new Promise((resolve) => {
+      const done = () => {
+        img.removeEventListener("load", done);
+        resolve();
+      };
+      img.addEventListener("load", done);
+      setTimeout(done, SIZE_SETTLE_MS);
+    });
   }
 
   function candidate(img) {
@@ -339,7 +362,7 @@
           byImg.delete(img);
           io.unobserve(img);
           imgs.delete(img);
-          displayWaits.delete(img);
+          laidOutWaits.delete(img);
           img.__amWatched = false;
         } else if (url && !cur && img.__amWatched && !waitingPermission.has(img) && !retrying.has(img)) {
           // src set after the observer's first report (blob: images a reader builds later): observe again for a new one
