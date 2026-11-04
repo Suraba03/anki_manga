@@ -15,6 +15,9 @@ let screenshot;
 let manifest = { name: "x" }; // an unpacked extension has no update_url
 let tabsAt = {}; // match pattern -> tabs returned by chrome.tabs.query
 const accessLevels = [];
+const installListeners = [];
+const createdTabs = [];
+const offscreenCreated = [];
 const storageChanged = [];
 
 const area = (data) => ({
@@ -27,7 +30,8 @@ globalThis.chrome = {
   runtime: {
     id: "ext",
     getManifest: () => manifest,
-    onInstalled: noEvents,
+    onInstalled: { addListener: (fn) => installListeners.push(fn) },
+    getURL: (path) => `chrome-extension://ext/${path}`,
     onStartup: noEvents,
     onMessage: { addListener: (fn) => listeners.push(fn) },
     sendMessage: async (msg) => {
@@ -36,7 +40,12 @@ globalThis.chrome = {
     },
     getContexts: async () => (offscreenOpen ? [{ contextType: "OFFSCREEN_DOCUMENT" }] : []),
   },
-  offscreen: { createDocument: async () => {} },
+  offscreen: {
+    createDocument: async (opts) => {
+      offscreenCreated.push(opts);
+      offscreenOpen = true;
+    },
+  },
   sidePanel: { setPanelBehavior: async () => {}, open: async () => {} },
   tabs: {
     onRemoved: { addListener: (fn) => tabEvents.removed.push(fn) },
@@ -47,6 +56,7 @@ globalThis.chrome = {
       tabOptions.push(options);
     },
     captureVisibleTab: async () => screenshot,
+    create: async (opts) => createdTabs.push(opts),
   },
   permissions: { contains: async () => granted },
   storage: {
@@ -373,4 +383,33 @@ test("when the engine becomes ready, tabs of enabled sites are told to retry the
   toTabs.length = 0;
   await send({ type: "eng:model-status", status: { state: "ready", progress: 1 } }, tab(9)); // forged by a tab
   assert.equal(toTabs.length, 0);
+});
+
+// --- first run ---------------------------------------------------------------------------------
+
+test("install (not update): opens the welcome tab and starts the engine so the models download meanwhile", async () => {
+  reset();
+  await startWorker("install");
+  const onInstalled = installListeners.at(-1);
+  createdTabs.length = offscreenCreated.length = 0;
+  offscreenOpen = false;
+  await onInstalled({ reason: "install" });
+  assert.deepEqual(createdTabs, [{ url: "chrome-extension://ext/welcome/welcome.html" }]);
+  assert.equal(offscreenCreated.length, 1);
+
+  createdTabs.length = offscreenCreated.length = 0;
+  offscreenOpen = false;
+  for (const reason of ["update", "chrome_update", "shared_module_update"]) await onInstalled({ reason });
+  assert.deepEqual(createdTabs, [], "never on an update");
+  assert.equal(offscreenCreated.length, 0);
+  offscreenOpen = true;
+});
+
+test("the engine reads the saved speed check through the worker (offscreen only)", async () => {
+  reset();
+  const send = await startWorker("getbench");
+  assert.deepEqual(await send({ type: "eng:get-benchmark" }), { ok: true, benchmark: null });
+  store.local.benchmark = { msPerPage: 5, mode: "on-demand", key: "wasm|a|b|c", ep: "wasm" };
+  assert.deepEqual(await send({ type: "eng:get-benchmark" }), { ok: true, benchmark: store.local.benchmark });
+  assert.deepEqual(await send({ type: "eng:get-benchmark" }, tab(3)), { ok: false });
 });

@@ -178,7 +178,7 @@ test("a saved result for other models or another backend is measured again and r
     assert.equal(log.status.at(-1).mode, undefined);
     await r.settled;
     assert.equal(log.measured, 1);
-    assert.deepEqual(log.saved, [{ msPerPage: 1234, mode: "prefetch", key: KEY_G }]);
+    assert.deepEqual(log.saved, [{ msPerPage: 1234, mode: "prefetch", ep: "webgpu", key: KEY_G }]);
   }
 });
 

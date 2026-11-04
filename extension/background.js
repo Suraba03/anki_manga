@@ -4,9 +4,15 @@ import { getSettings } from "./lib/settings.js";
 // Classic content scripts, loaded in this order into one isolated world.
 export const CONTENT_FILES = ["content/page-finder.js", "content/layout.js", "content/overlay.js", "content/status.js", "content/main.js"];
 
-chrome.runtime.onInstalled.addListener(() => {
+chrome.runtime.onInstalled.addListener(async ({ reason } = {}) => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
   restoreSites();
+  // A fresh install: the welcome tab explains the one-time model download, which starts right away (the
+  // offscreen document boots the engine when it loads). The tab cannot start it itself: am:engine refuses tabs.
+  if (reason === "install") {
+    await chrome.tabs.create({ url: chrome.runtime.getURL("welcome/welcome.html") }).catch(() => {});
+    await ensureOffscreen().catch(() => {});
+  }
 });
 chrome.runtime.onStartup.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
@@ -309,6 +315,12 @@ const handlers = {
     // Pages that failed while the engine was down (or are waiting) try again.
     if (msg.status && msg.status.state === "ready") await toEnabledTabs({ type: "am:retry" });
   }),
+  // The saved speed check (engine/startup.js reuses it while the backend and model files are unchanged).
+  "eng:get-benchmark": async (msg, sender) => {
+    if (sender.tab) return { ok: false };
+    const { benchmark = null } = await chrome.storage.local.get("benchmark");
+    return { ok: true, benchmark };
+  },
   "eng:benchmark": fromEngine((msg) =>
     msg.benchmark ? chrome.storage.local.set({ benchmark: msg.benchmark }) : chrome.storage.local.remove("benchmark"),
   ),

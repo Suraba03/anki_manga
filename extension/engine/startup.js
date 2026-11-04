@@ -29,7 +29,7 @@ function summaryLine(ep, timings) {
 // receivedBytes/totalBytes/etaSec; "loading" carries firstRun (something was downloaded in this start); "ready"
 // carries ep, mode (once known) and timings ({files_<set>, probe_webgpu, create_<ep>, ready, then warmup_<ep>,
 // benchmark_<ep>, total} in ms, plus per-file records). "ready" is sent again when the background work settles.
-// savedBenchmark: {get() → saved result | null, set(result)}: {msPerPage, mode, key} across starts.
+// savedBenchmark: {get() → saved result | null, set(result)}: {msPerPage, mode, ep, key} across starts.
 // Resolves at ready: {engine, ep, benchmark: the reused saved result or null, settled}. engine is stable: its calls
 // wait for the warm-up (and a needed measurement) and, after a WebGPU failure there, run on WASM. settled resolves (never rejects) to
 // {ep, benchmark} or {error} once the background work is done. Model-file errors (ModelError) propagate untouched.
@@ -127,7 +127,7 @@ export async function startEngine({
     let benchmark = reusable(current.ep, set);
     if (!benchmark) {
       const m = await timed(`benchmark_${current.ep}`, () => measure(current, page));
-      benchmark = { msPerPage: m.msPerPage, mode: m.mode, key: benchmarkKey(current.ep, set) };
+      benchmark = { msPerPage: m.msPerPage, mode: m.mode, ep: current.ep, key: benchmarkKey(current.ep, set) };
       await Promise.resolve()
         .then(() => savedBenchmark.set(benchmark))
         .catch(() => {});

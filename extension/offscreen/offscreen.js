@@ -4,6 +4,7 @@ import * as ort from "../vendor/ort/ort.webgpu.min.mjs";
 import { buildModelSets, ensureFiles, clearModels } from "../engine/models.js";
 import { configureOrt } from "../engine/runtime.js";
 import { startEngine } from "../engine/startup.js";
+import { busyReply } from "../engine/busy.js";
 import { openStore } from "../engine/store.js";
 import { OcrScheduler } from "../engine/scheduler.js";
 import { createTokenizer } from "../lib/tokenizer.js";
@@ -114,9 +115,13 @@ function boot() {
         sets: buildModelSets(manifest),
         ensure,
         onStatus: setStatus,
+        // The speed check lives in the worker's storage.local "benchmark" (its perfMode reads the mode there).
+        savedBenchmark: {
+          get: async () => (await chrome.runtime.sendMessage({ type: "eng:get-benchmark" }).catch(() => null))?.benchmark ?? null,
+          set: (benchmark) => toWorker({ type: "eng:benchmark", benchmark }),
+        },
       });
       engine = started.engine;
-      await toWorker({ type: "eng:benchmark", benchmark: { ...started.benchmark, ep: started.ep } });
     } catch (e) {
       console.error("engine start failed", e);
       setStatus({ state: "error", progress: 0, error: (e && e.error) || "engine_error" });
@@ -186,11 +191,6 @@ async function rgbaFor(pageId) {
   }
 }
 
-// null when the engine can take work, else the error to reply with.
-function busyError() {
-  if (status.state === "ready") return null;
-  return status.state === "loading" ? "models_loading" : "models_downloading";
-}
 
 async function enginePage(msg) {
   if (status.state === "error") {
@@ -198,8 +198,8 @@ async function enginePage(msg) {
     boot(); // every page request after a failure tries again
     if (err !== "models_cleared") return { ok: false, error: "engine_error" };
   }
-  const busy = busyError();
-  if (busy) return { ok: false, error: busy };
+  const busy = busyReply(status);
+  if (busy) return busy;
 
   let img;
   try {
@@ -232,8 +232,8 @@ async function enginePage(msg) {
 // The user hovers a bubble: OCR it next (also in on-demand mode, where nothing was queued). A text that is
 // already known is returned in the reply instead of being OCR'd again.
 async function enginePrioritize({ pageId, bubbleId }) {
-  const busy = busyError();
-  if (busy) return { ok: false, error: busy };
+  const busy = busyReply(status);
+  if (busy) return busy;
   const page = await store.getPage(pageId);
   if (!page) return { ok: false, error: "page_expired" };
   const bubble = page.bubbles.find((b) => b.id === bubbleId);

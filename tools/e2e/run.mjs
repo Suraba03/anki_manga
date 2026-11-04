@@ -294,6 +294,19 @@ async function panelCheck(sw, ref) {
 const mb = (bytes) => `${(bytes / 1e6).toFixed(1)} MB`;
 const secs = (ms) => `${(ms / 1000).toFixed(1)} s`;
 
+// A fresh profile is an install: background.js opens the welcome tab and starts the engine at once, before the
+// harness could point it at the local mirror. Check the tab, then stop that engine and drop what it cached, so
+// the timed start below uses the mirror only.
+async function restartAfterInstall(sw) {
+  const targets = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
+  const welcome = targets.some((t) => t.type === "page" && t.url.endsWith("/welcome/welcome.html"));
+  console.log(`  welcome tab opened on install: ${welcome ? "yes" : "NO"}`);
+  await sw.evaluate("chrome.offscreen.closeDocument().catch(() => {})");
+  await sw.evaluate('caches.delete("anki-manga-models")');
+  await sw.evaluate('chrome.storage.session.remove("modelStatus")');
+  return welcome;
+}
+
 // Creates the offscreen document and waits for modelStatus to settle; prints each status change on the way.
 async function bootEngine(sw) {
   const t0 = Date.now();
@@ -336,12 +349,14 @@ async function firstRun(launch) {
   const server = await startServer(null);
   try {
     const runs = [];
+    let ok = true;
     for (const kind of ["cold", "warm"]) {
       const { sw, stop } = await launch();
       try {
         await waitFor(() => sw.evaluate('typeof handlers === "object"'), "background.js to load");
         await sw.evaluate(`chrome.storage.local.set({devModelBase: ${JSON.stringify(`http://127.0.0.1:${SERVE_PORT}/models/`)}})`);
         console.log(`--- ${kind} start`);
+        if (kind === "cold" && !(await restartAfterInstall(sw))) ok = false;
         await bootEngine(sw);
         // "ready" comes before the warm-up: how long does a page asked for right then take, and the next one?
         const origin = `http://127.0.0.1:${SERVE_PORT}`;
@@ -365,7 +380,7 @@ async function firstRun(launch) {
     const stages = stagesOf(Object.assign({}, ...runs.map(([, s]) => s.timings)));
     console.log(`\n| stage | ${runs.map(([k, s]) => `${k} (${s.ep})`).join(" | ")} |\n|---|${runs.map(() => "---:|").join("")}`);
     for (const stage of stages) console.log(`| ${stage} | ${runs.map(([, s]) => (s.timings?.[stage] != null ? secs(s.timings[stage]) : "—")).join(" | ")} |`);
-    return runs.every(([, s]) => s.state === "ready");
+    return ok && runs.every(([, s]) => s.state === "ready");
   } finally {
     server.close();
   }
@@ -384,6 +399,7 @@ async function smoke(sw) {
   try {
     await waitFor(() => sw.evaluate('typeof handlers === "object"'), "background.js to load");
     await sw.evaluate(`chrome.storage.local.set({devModelBase: ${JSON.stringify(`${origin}/models/`)}})`);
+    await restartAfterInstall(sw);
     // Force prefetch: the benchmark may pick on-demand OCR (e.g. software WebGPU in headless Chrome).
     await sw.evaluate('chrome.storage.local.set({settings: {perfMode: "prefetch"}})');
     await sw.evaluate(`handlers["am:enable-site"]({origin: ${JSON.stringify(origin)}}, {})`);
