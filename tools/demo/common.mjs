@@ -100,5 +100,6 @@ export function startServer(port, routes) {
   return new Promise((resolve) => server.listen(port, "127.0.0.1", () => resolve(server)));
 }
 
-export const launch = (chromePath, args) => spawn(chromePath, args, { stdio: "ignore" });
+// Every fresh profile would otherwise ask for the macOS keychain ("Chrome for Testing Safe Storage"): use a mock one.
+export const launch = (chromePath, args) => spawn(chromePath, ["--use-mock-keychain", "--password-store=basic", ...args], { stdio: "ignore" });
 export const readText = (p) => readFileSync(p, "utf8");

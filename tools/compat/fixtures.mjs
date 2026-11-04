@@ -8,6 +8,7 @@ import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { deflateSync } from "node:zlib";
 import { ROOT } from "../demo/common.mjs";
 import { port } from "../ports.mjs";
 
@@ -15,7 +16,19 @@ const PORT = port(47950);
 const PAGE = readFileSync(join(ROOT, "docs/demo/page.png"));
 const READER = "http://reader.test";
 const CDN = "http://cdn.test";
-const H = 860; // displayed page height: fits the 900 px viewport
+const H = 860;
+const flakySeen = new Set(); // lazy-flaky: CDN URLs whose first CORS fetch already got its connection dropped
+
+// A blank gray PNG (manga-sized: what lazy readers show before the real page arrives).
+function grayPng(w, h) {
+  const crcTable = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+  const crc = (buf) => { let c = 0xffffffff; for (const b of buf) c = crcTable[(c ^ b) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+  const chunk = (type, data) => { const out = Buffer.alloc(12 + data.length); out.writeUInt32BE(data.length, 0); out.write(type, 4); data.copy(out, 8); out.writeUInt32BE(crc(out.subarray(4, 8 + data.length)), 8 + data.length); return out; };
+  const head = Buffer.alloc(13); head.writeUInt32BE(w, 0); head.writeUInt32BE(h, 4); head[8] = 8; head[9] = 0; // 8-bit gray
+  const rows = Buffer.alloc((w + 1) * h, 0xcc); for (let y = 0; y < h; y++) rows[y * (w + 1)] = 0;
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", head), chunk("IDAT", deflateSync(rows)), chunk("IEND", Buffer.alloc(0))]);
+}
+const PLACEHOLDER = grayPng(600, 860); // displayed page height: fits the 900 px viewport
 
 const shell = (body, script = "") => `<!doctype html><meta charset="utf-8"><title>fixture</title>
 <body style="margin:0;background:#2b2b2e;display:flex;flex-direction:column;align-items:center;gap:40px;padding:10px 0">${body}
@@ -44,10 +57,22 @@ const PAGES = {
   "iframe-cdn": ["reader in an iframe from another host", shell(`<iframe src="${CDN}/inner" style="width:700px;height:${H + 20}px;border:0"></iframe>`)],
   shadow: ["<img> inside a shadow root", shell(`<manga-page></manga-page>`,
     `customElements.define("manga-page", class extends HTMLElement { connectedCallback() { this.attachShadow({ mode: "open" }).innerHTML = '<img src="/img/page.png?shadow" style="height:${H}px;display:block">'; } });`)],
+  "lazy-reused": ["vue-lazyload style: same-origin manga-sized placeholder, real page from a CORS CDN; one <img> reused for the next page", lazyReused("cors")],
+  "lazy-flaky": ["same, but the CDN drops the first CORS fetch of every image (a transient network error)", lazyReused("flaky")],
   swap: ["one <img> whose src the reader swaps to the next page", shell(img("/img/page.png?p=1", 'id="p"'), `setTimeout(() => (document.getElementById("p").src = "/img/page.png?p=2"), 9000);`)],
   "two-pages": ["two pages side by side", shell(`<div style="display:flex;gap:4px">${img("/img/page.png?l", 'style="height:700px"')}${img("/img/page.png?r", 'style="height:700px"')}</div>`)],
   scroll: ["a chapter of 6 pages in a long scroll", shell([1, 2, 3, 4, 5, 6].map((i) => img(`/img/page.png?n=${i}`, 'loading="lazy"')).join(""))],
 };
+
+// Two lazy <img>: a loads page 12 after 1.5 s; b loads 21, then (5 s) is reused for 22 (placeholder in between).
+function lazyReused(route) {
+  const url = (n) => `${CDN}/${route}/page.png?n=${n}`;
+  const lazyImg = (id, n) => `<img id="${id}" loading="lazy" data-src="${url(n)}" src="/img/placeholder.png" lazy="loading" style="height:700px;display:block">`;
+  return shell(`<div style="display:flex;gap:4px">${lazyImg("a", 12)}${lazyImg("b", 21)}</div>`,
+    `const load = (el) => { el.src = el.dataset.src; el.setAttribute("lazy", "loaded"); };
+    setTimeout(() => { load(document.getElementById("a")); load(document.getElementById("b")); }, 1500);
+    setTimeout(() => { const b = document.getElementById("b"); b.dataset.src = "${url(22)}"; b.src = "/img/placeholder.png"; b.setAttribute("lazy", "loading"); setTimeout(() => load(b), 1500); }, 5000);`);
+}
 
 function drawCanvas(src) {
   return `const i = new Image(); i.onload = () => document.getElementById("c").getContext("2d").drawImage(i, 0, 0); i.src = "${src}";`;
@@ -72,6 +97,15 @@ const server = createServer((req, res) => {
   if (path === "/inner") return send(200, "text/html; charset=utf-8", shell(img("/img/page.png?inner")));
   if (path === "/img/page.png") return png();
   if (path === "/cors/page.png") return png({ "Access-Control-Allow-Origin": "*" });
+  if (path === "/img/placeholder.png") return send(200, "image/png", PLACEHOLDER, { "Cache-Control": "no-store" });
+  if (path === "/flaky/page.png") {
+    // the first fetch() with an Origin header (the extension's) per URL loses its connection; <img> loads pass
+    if (req.headers.origin && !flakySeen.has(req.url)) {
+      flakySeen.add(req.url);
+      return req.socket.destroy();
+    }
+    return png({ "Access-Control-Allow-Origin": "*" });
+  }
   if (path === "/guarded/page.png") return (req.headers.referer || "").startsWith(READER) ? png() : send(403, "text/plain", "hotlink");
   if (path === "/private/page.png") return /(^|; )sess=ok/.test(req.headers.cookie || "") ? png() : send(403, "text/plain", "no session");
   if (path === "/dest/page.png") return /^image\//.test(req.headers.accept || "") ? png() : send(403, "text/plain", "not an image load");

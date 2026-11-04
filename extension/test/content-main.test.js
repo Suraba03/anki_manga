@@ -343,6 +343,46 @@ test("when fetch and canvas both fail, the worker is asked with the URL only", a
   assert.deepEqual(plain(env.ofType("am:page")), [{ type: "am:page", imageUrl: SAME }]);
 });
 
+test("the canvas copy is only made of the image the <img> shows: a placeholder under data-src is not copied", async () => {
+  const real = "https://cdn.example/real.jpg";
+  const img = makeImg("https://reader.example/placeholder.png", { dataset: { src: real }, currentSrc: "https://reader.example/placeholder.png", naturalWidth: 600, naturalHeight: 860 });
+  const env = await load({ imgs: [img], fetch: () => { throw new TypeError("network"); }, canvas: "ok" });
+  await env.intersect(img, {});
+  assert.equal(env.drawn.length, 0);
+  assert.deepEqual(plain(env.ofType("am:page")), [{ type: "am:page", imageUrl: real }]);
+});
+
+test("the canvas copy is made when currentSrc is the URL (hash ignored)", async () => {
+  const real = "https://cdn.example/real.jpg";
+  const img = makeImg("https://reader.example/placeholder.png", { dataset: { src: real }, currentSrc: real + "#x" });
+  const env = await load({ imgs: [img], fetch: () => { throw new TypeError("network"); }, canvas: "ok" });
+  await env.intersect(img, {});
+  assert.equal(env.drawn.length, 1);
+  assert.equal(env.ofType("am:page")[0].dataUrl, fake("canvas"));
+});
+
+test("a reply for a page the reused <img> no longer shows is not drawn; the new page is processed", async () => {
+  const [u12, u13] = ["https://cdn.example/12.jpg", "https://cdn.example/13.jpg"];
+  const img = makeImg("https://reader.example/placeholder.png", { dataset: { src: u12 }, currentSrc: u12 });
+  let release12;
+  const slow12 = new Promise((r) => (release12 = r));
+  const env = await load({
+    imgs: [img],
+    replies: { "am:page": (m) => (m.imageUrl === u12 ? slow12 : { ok: true, page: { ...page([null]), page_id: "P13" } }) },
+  });
+  await env.intersect(img, {});
+  assert.equal(env.ofType("am:page").length, 1);
+  // the reader reuses the <img> for page 13
+  img.dataset.src = u13;
+  img.currentSrc = u13;
+  await env.mutate([{ type: "attributes", target: img }]);
+  await env.intersect(img, {});
+  assert.deepEqual(env.ofType("am:page").map((m) => m.imageUrl), [u12, u13]);
+  release12({ ok: true, page: { ...page([null]), page_id: "P12" } });
+  await flush();
+  assert.deepEqual(env.handles.map((h) => h.page.page_id), ["P13"], "page 12 is not drawn on the image that shows 13");
+});
+
 test("an image that is not displayed yet is not copied through a canvas", async () => {
   const lazy = makeImg("data:image/gif;base64,R0lGOD", { dataset: { src: SAME }, complete: false, naturalWidth: 0, naturalHeight: 0 });
   const env = await load({ imgs: [lazy], fetch: () => false, canvas: "ok" });
@@ -363,20 +403,29 @@ test("a blob: image is never sent to the worker as a URL; when its bytes can't b
   assert.equal(bad.captures().length, 1, "falls back to a screenshot");
 });
 
-test("a CDN image is fetched too; after a failure the host is not fetched again in this tab", async () => {
-  const a = makeImg("https://cdn.example/1.jpg");
-  const b = makeImg("https://cdn.example/2.jpg");
-  const c = makeImg("https://other.example/3.jpg");
-  const env = await load({ imgs: [a, b, c], fetch: (url) => { if (url.includes("cdn.example")) throw new TypeError("CORS"); return true; } });
-  await env.intersect(a, {});
-  await env.intersect(b, {});
-  await env.intersect(c, {});
-  assert.deepEqual(env.fetched, ["https://cdn.example/1.jpg", "https://other.example/3.jpg"]);
-  assert.deepEqual(env.ofType("am:page").map((m) => [m.imageUrl, !!m.dataUrl]), [
-    ["https://cdn.example/1.jpg", false],
-    ["https://cdn.example/2.jpg", false],
-    ["https://other.example/3.jpg", true],
-  ]);
+test("a CDN image is fetched too; after two failures in a row the host is not fetched again in this tab", async () => {
+  const urls = ["https://cdn.example/1.jpg", "https://cdn.example/2.jpg", "https://cdn.example/3.jpg"];
+  const imgs = urls.map((u) => makeImg(u));
+  const other = makeImg("https://other.example/4.jpg");
+  const env = await load({ imgs: [...imgs, other], fetch: (url) => { if (url.includes("cdn.example")) throw new TypeError("CORS"); return true; } });
+  for (const img of [...imgs, other]) await env.intersect(img, {});
+  assert.deepEqual(env.fetched, [urls[0], urls[1], "https://other.example/4.jpg"], "the third image of the host skips the fetch");
+  assert.deepEqual(env.ofType("am:page").map((m) => !!m.dataUrl), [false, false, false, true]);
+});
+
+test("one network error does not block a host; a success in between resets the count", async () => {
+  let fail = new Set(["1", "3"]);
+  const imgs = [1, 2, 3, 4, 5].map((n) => makeImg(`https://cdn.example/${n}.jpg`));
+  const env = await load({ imgs, fetch: (url) => { if (fail.has(url.match(/(\d)\.jpg/)[1])) throw new TypeError("net"); return true; } });
+  for (const img of imgs) await env.intersect(img, {});
+  assert.equal(env.fetched.length, 5, "fail, ok, fail, ok, ok: never two failures in a row");
+  fail = new Set(["6", "7"]);
+  for (const n of [6, 7, 8]) {
+    const img = makeImg(`https://cdn.example/${n}.jpg`);
+    env.imgs.push(img);
+    await env.intersect(img, {});
+  }
+  assert.equal(env.fetched.length, 7, "two in a row: the host is blocked, the eighth is not fetched");
 });
 
 test("an HTTP error from a CDN host does not stop the content script from fetching its next image", async () => {

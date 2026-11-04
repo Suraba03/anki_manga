@@ -99,6 +99,8 @@
   // --- processing -------------------------------------------------------------------------
   const MAX_DATA_URL = 48 * 1024 * 1024; // the worker's limit; Chrome's 64 MB per message also has to hold the envelope
   const corsBlocked = new Set(); // hosts whose images this tab could not fetch (no CORS): one console error per host
+  const fetchThrows = new Map(); // host -> fetches that threw since the last success (one network error is no CORS)
+  const CORS_STRIKES = 2;
 
   function toDataUrl(blob) {
     if ((blob.size * 4) / 3 > MAX_DATA_URL) return Promise.reject(new Error("too big")); // base64 is 4/3 of the bytes
@@ -120,8 +122,12 @@
       let resp = null;
       try {
         resp = await fetch(url);
+        fetchThrows.delete(u.host);
       } catch {
-        if (!direct) corsBlocked.add(u.host); // a TypeError: network or CORS. An HTTP error says nothing about the host.
+        // A TypeError: network or CORS. Twice in a row blocks the host (an HTTP error says nothing about it).
+        const strikes = (fetchThrows.get(u.host) || 0) + 1;
+        fetchThrows.set(u.host, strikes);
+        if (!direct && strikes >= CORS_STRIKES) corsBlocked.add(u.host);
       }
       try {
         if (resp && resp.ok) dataUrl = await toDataUrl(await resp.blob());
@@ -129,7 +135,7 @@
         /* unreadable or too big: the next source */
       }
     }
-    if (!dataUrl && isShown(img) && PageFinder.realImageUrl(img) === url) {
+    if (!dataUrl && isShown(img) && shows(img, url)) {
       // servers that refuse a second load, one-time tokens, blob: images whose fetch failed; a tainted canvas throws
       try {
         const canvas = document.createElement("canvas");
@@ -143,6 +149,15 @@
       }
     }
     return dataUrl;
+  }
+
+  // The <img> currently displays url (not a lazy placeholder, nor the previous page of a reused element).
+  function shows(img, url) {
+    try {
+      return PageFinder.pageKey(new URL(img.currentSrc || img.src, document.baseURI).href) === PageFinder.pageKey(url);
+    } catch {
+      return false;
+    }
   }
 
   async function loadPage(img, url) {

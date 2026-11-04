@@ -367,6 +367,8 @@ async function main() {
   const chrome = spawn(
     chromePath,
     [
+      "--use-mock-keychain", // no macOS keychain prompt for a fresh profile (same flags as tools/demo/common.mjs launch())
+      "--password-store=basic",
       "--headless=new",
       `--load-extension=${EXTENSION}`,
       "--disable-features=DisableLoadExtensionCommandLineSwitch",
