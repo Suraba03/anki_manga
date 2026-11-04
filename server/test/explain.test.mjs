@@ -14,7 +14,7 @@ const MONTH = "2026-11";
 const CONFIG = {
   DAILY_PER_INSTALL: 100,
   DAILY_PER_IP: 300,
-  DAILY_REFUSALS_PER_IP: 20,
+  DAILY_FAILED_PER_IP: 20,
   MONTHLY_CAP_USD: 10,
   PRICE_IN_HIT: 0.000001,
   PRICE_IN_MISS: 0.00001,
@@ -371,7 +371,7 @@ test("a paid but unparseable answer adds its spend, but no quota and no cache, a
   assert.ok(Math.abs((await db.getSpend(MONTH)) - COST) < 1e-12);
   assert.equal(db.cache.size, 0);
   assert.equal(db.installs.size, 0);
-  assert.equal(db.ips.size, 0);
+  assert.equal(db.ips.has(`${DAY}|iphash`), false); // the normal per-IP counter; the failed-call counter is tested below
 });
 
 test("a paid unparseable answer without usage is charged the estimate", async () => {
@@ -492,12 +492,12 @@ test("a refusal is logged by kind, without the model's text", async () => {
 // ---- refusals are paid calls: a per-IP daily ceiling ----
 
 const REFUSE = async () => ({ result: "I can't help with that.", usage: USAGE, finishReason: "stop" });
-const REFUSED_KEY = `${DAY}|refused:iphash`;
+const FAILED_KEY = `${DAY}|failed:iphash`;
 
-test("a refusal counts against the IP's refusal counter only: not the normal IP counter, not the install", async () => {
+test("a refusal counts against the IP's failed-call counter only: not the normal IP counter, not the install", async () => {
   const { db, ctx } = setup({ callLlm: REFUSE });
   assert.equal((await handleExplain(body(), ctx)).status, 422);
-  assert.equal(db.ips.get(REFUSED_KEY), 1);
+  assert.equal(db.ips.get(FAILED_KEY), 1);
   assert.equal(db.ips.size, 1);
   assert.equal(db.installs.size, 0);
   assert.equal(db.cache.size, 0);
@@ -514,12 +514,12 @@ test("the 21st refusal from one IP in a day is 429 free_daily_limit, and the LLM
   assert.deepEqual(r.json, { error: "free_daily_limit" });
   assert.equal(calls.length, 20);
   assert.equal(await db.getSpend(MONTH), spent);
-  assert.equal(db.ips.get(REFUSED_KEY), 20);
+  assert.equal(db.ips.get(FAILED_KEY), 20);
 });
 
-test("the refusal ceiling is DAILY_REFUSALS_PER_IP", async () => {
+test("the refusal ceiling is DAILY_FAILED_PER_IP", async () => {
   const { calls, ctx } = setup();
-  const refusing = { ...ctx, config: { ...CONFIG, DAILY_REFUSALS_PER_IP: 2 }, callLlm: async (t) => (calls.push(t), REFUSE()) };
+  const refusing = { ...ctx, config: { ...CONFIG, DAILY_FAILED_PER_IP: 2 }, callLlm: async (t) => (calls.push(t), REFUSE()) };
   assert.equal((await handleExplain(body(), refusing)).status, 422);
   assert.equal((await handleExplain(body(), refusing)).status, 422);
   assert.equal((await handleExplain(body(), refusing)).status, 429);
@@ -528,7 +528,7 @@ test("the refusal ceiling is DAILY_REFUSALS_PER_IP", async () => {
 
 test("a blocked IP blocks any line and any install, but another IP is unaffected", async () => {
   const { db, calls, ctx } = setup();
-  db.ips.set(REFUSED_KEY, 20);
+  db.ips.set(FAILED_KEY, 20);
   const r = await handleExplain(body({ install_id: ID2, text: "さようなら" }), ctx);
   assert.equal(r.status, 429);
   assert.equal(r.json.error, "free_daily_limit");
@@ -540,7 +540,7 @@ test("a blocked IP blocks any line and any install, but another IP is unaffected
 
 test("the refusal counter resets on the next UTC day", async () => {
   const { db, ctx } = setup();
-  db.ips.set(REFUSED_KEY, 20);
+  db.ips.set(FAILED_KEY, 20);
   const r = await handleExplain(body(), { ...ctx, now: new Date("2026-11-02T00:00:01Z") });
   assert.equal(r.status, 200);
 });
@@ -552,16 +552,61 @@ test("successful explanations do not touch the refusal counter", async () => {
   assert.equal(db.ips.get(`${DAY}|iphash`), 3);
 });
 
-test("a rejected (non-refusal) answer is not counted as a refusal", async () => {
-  const { db, ctx } = setup({ callLlm: async () => ({ result: CUT, usage: USAGE, finishReason: "length" }) });
+test("a rejected (non-refusal) answer is a paid call without an explanation: it is counted too, and stays 502", async () => {
+  for (const out of [
+    { result: CUT, finishReason: "length" },
+    { result: "{not valid json}", finishReason: "stop" }, // malformed JSON
+    { result: JSON.stringify({ notes: [], suggestions: [] }), finishReason: "stop" }, // JSON without translation
+  ]) {
+    const { db, ctx } = setup({ callLlm: async () => ({ ...out, usage: USAGE }) });
+    const r = await handleExplain(body(), ctx);
+    assert.equal(r.status, 502, JSON.stringify(out));
+    assert.equal(r.json.error, "free_unavailable");
+    assert.deepEqual([...db.ips], [[FAILED_KEY, 1]], JSON.stringify(out));
+    assert.equal(db.installs.size, 0);
+  }
+});
+
+test("a paid call whose body was unreadable (HTTP 200, e.paid) is counted too, and stays 502", async () => {
+  const { db, ctx } = setup({
+    callLlm: async () => {
+      throw Object.assign(new Error("bad payload"), { paid: true, usage: USAGE });
+    },
+  });
   assert.equal((await handleExplain(body(), ctx)).status, 502);
-  assert.equal(db.ips.size, 0);
+  assert.deepEqual([...db.ips], [[FAILED_KEY, 1]]);
+});
+
+test("a provider failure where nothing was paid (network error, non-200) is not counted", async () => {
+  for (const e of [new Error("network down"), Object.assign(new Error("DeepSeek HTTP error"), { status: 500 })]) {
+    const { db, ctx } = setup({
+      callLlm: async () => {
+        throw e;
+      },
+    });
+    assert.equal((await handleExplain(body(), ctx)).status, 502);
+    assert.equal(db.ips.size, 0);
+    assert.equal(await db.getSpend(MONTH), 0);
+  }
+});
+
+test("failed paid calls of every kind share one ceiling", async () => {
+  const { db, calls, ctx } = setup();
+  const outs = [REFUSE, async () => ({ result: CUT, usage: USAGE, finishReason: "length" }), async () => { throw Object.assign(new Error("x"), { paid: true }); }];
+  let n = 0;
+  const mixed = { ...ctx, config: { ...CONFIG, DAILY_FAILED_PER_IP: 3 }, callLlm: async (t) => (calls.push(t), outs[n++ % 3]()) };
+  const statuses = [];
+  for (let i = 0; i < 3; i++) statuses.push((await handleExplain(body(), mixed)).status);
+  assert.deepEqual(statuses, [422, 502, 502]);
+  assert.equal((await handleExplain(body(), mixed)).status, 429);
+  assert.equal(calls.length, 3);
+  assert.equal(db.ips.get(FAILED_KEY), 3);
 });
 
 test("a cached line is still served to an IP at its refusal ceiling", async () => {
   const { db, calls, ctx } = setup();
   assert.equal((await handleExplain(body(), ctx)).status, 200);
-  db.ips.set(REFUSED_KEY, 20);
+  db.ips.set(FAILED_KEY, 20);
   const r = await handleExplain(body(), ctx);
   assert.equal(r.status, 200);
   assert.deepEqual(r.json, { result: PARSED });
@@ -576,12 +621,12 @@ test("the refusal log carries neither the line nor the IP hash", async () => {
   assert.doesNotMatch(logged, /SECRET-LINE|iphash-secret/);
 });
 
-test("parseConfig: DAILY_REFUSALS_PER_IP is read like the other limits and defaults to 20", () => {
+test("parseConfig: DAILY_FAILED_PER_IP is read like the other limits and defaults to 20", () => {
   const env = {
     DAILY_PER_INSTALL: "100", DAILY_PER_IP: "300", MONTHLY_CAP_USD: "10",
     PRICE_IN_HIT: "6e-9", PRICE_IN_MISS: "3e-7", PRICE_OUT: "1.2e-6",
   };
-  assert.equal(parseConfig(env).DAILY_REFUSALS_PER_IP, 20);
-  assert.equal(parseConfig({ ...env, DAILY_REFUSALS_PER_IP: "5" }).DAILY_REFUSALS_PER_IP, 5);
-  assert.throws(() => parseConfig({ ...env, DAILY_REFUSALS_PER_IP: "lots" }));
+  assert.equal(parseConfig(env).DAILY_FAILED_PER_IP, 20);
+  assert.equal(parseConfig({ ...env, DAILY_FAILED_PER_IP: "5" }).DAILY_FAILED_PER_IP, 5);
+  assert.throws(() => parseConfig({ ...env, DAILY_FAILED_PER_IP: "lots" }));
 });

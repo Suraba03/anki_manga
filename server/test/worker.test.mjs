@@ -309,7 +309,7 @@ function ipCountsD1() {
   };
 }
 
-test("refusals are kept in ip_counts under a refused: key: the 21st from one IP is 429 without a paid call", async () => {
+test("refusals are kept in ip_counts under a failed: key: the 21st from one IP is 429 without a paid call", async () => {
   const d1 = ipCountsD1();
   let paidCalls = 0;
   const llm = async () => (paidCalls++, { result: "I can't help with that.", usage: {}, finishReason: "stop" });
@@ -322,16 +322,16 @@ test("refusals are kept in ip_counts under a refused: key: the 21st from one IP 
   assert.equal(paidCalls, 20);
 
   const hash = createHash("sha256").update("salt203.0.113.9").digest("hex");
-  assert.deepEqual([...d1.ipRows], [[`2026-11-01|refused:${hash}`, 20]]);
+  assert.deepEqual([...d1.ipRows], [[`2026-11-01|failed:${hash}`, 20]]);
   assert.ok(!d1.log.some((e) => e.args.some((a) => String(a).includes("203.0.113.9"))), "no raw IP reaches D1");
 
   const other = await handle(req({ headers: { "CF-Connecting-IP": "198.51.100.1" } }), env, { callLlm: llm, now });
   assert.equal(other.status, 422);
 });
 
-test("wrangler.toml sets DAILY_REFUSALS_PER_IP next to the other limits", () => {
+test("wrangler.toml sets DAILY_FAILED_PER_IP next to the other limits", () => {
   const toml = readFileSync(new URL("../wrangler.toml", import.meta.url), "utf8");
-  assert.match(toml, /^DAILY_REFUSALS_PER_IP = "20"$/m);
+  assert.match(toml, /^DAILY_FAILED_PER_IP = "20"$/m);
 });
 
 const STORE_ORIGIN = "chrome-extension://bgfnpifeeclmpfdcahphaiahgafjppeo";

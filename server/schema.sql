@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS install_counts (
 ) WITHOUT ROWID;
 
 -- Paid calls per salted IP hash per UTC day. Pruned after 2 days by the cron.
+-- Rows whose h starts with 'failed:' count paid calls that gave no explanation (refused or unusable answers) for
+-- the same hash, against DAILY_FAILED_PER_IP; they are separate from the normal per-IP count.
 CREATE TABLE IF NOT EXISTS ip_counts (
   day TEXT NOT NULL,
   h   TEXT NOT NULL,            -- sha256(IP_SALT + ip), never the raw address
