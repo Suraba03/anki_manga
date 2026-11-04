@@ -5,6 +5,7 @@ import { buildModelSets, ensureFiles, clearModels } from "../engine/models.js";
 import { configureOrt } from "../engine/runtime.js";
 import { startEngine } from "../engine/startup.js";
 import { busyReply } from "../engine/busy.js";
+import { pageGate, resolveScope, retireEngine } from "../engine/gate.js";
 import { openStore } from "../engine/store.js";
 import { OcrScheduler } from "../engine/scheduler.js";
 import { createTokenizer } from "../lib/tokenizer.js";
@@ -54,6 +55,7 @@ const PAGES_IN_MEMORY = 6; // decoded pages kept for on-demand OCR (about 7 MB e
 let status = { state: "downloading", progress: 0 };
 let persistedProgress = -1;
 let engine = null;
+let prepared = null; // the benchmark once the engine's warm-up and speed check are done (pages wait for it)
 let store = null;
 let booting = null;
 const decoded = new Map(); // pageId -> rgba, least recently used first
@@ -104,6 +106,8 @@ function loadManifest() {
 
 function boot() {
   booting ||= (async () => {
+    engine = await retireEngine(engine); // a retry after a post-ready failure must not leak the old sessions
+    prepared = null;
     setStatus({ state: "downloading", progress: 0 });
     try {
       store ||= await openStore(indexedDB);
@@ -122,6 +126,9 @@ function boot() {
         },
       });
       engine = started.engine;
+      started.settled.then((r) => {
+        if (engine === started.engine && !r.error) prepared = r.benchmark;
+      });
     } catch (e) {
       console.error("engine start failed", e);
       setStatus({ state: "error", progress: 0, error: (e && e.error) || "engine_error" });
@@ -198,8 +205,9 @@ async function enginePage(msg) {
     boot(); // every page request after a failure tries again
     if (err !== "models_cleared") return { ok: false, error: "engine_error" };
   }
-  const busy = busyReply(status);
+  const busy = pageGate(status, prepared);
   if (busy) return busy;
+  const { mode } = prepared;
 
   let img;
   try {
@@ -225,7 +233,7 @@ async function enginePage(msg) {
   }
   if (!(await store.loadImage(pageId))) await store.saveImage(pageId, bytes);
   remember(pageId, rgba);
-  if (msg.ocr === "all") scheduler.enqueuePage(pageId, rgba, page.bubbles);
+  if (resolveScope(msg.ocr, mode) === "all") scheduler.enqueuePage(pageId, rgba, page.bubbles);
   return { ok: true, page: { page_id: pageId, width: page.width, height: page.height, bubbles: page.bubbles } };
 }
 

@@ -1,5 +1,6 @@
 // Service worker: per-site activation, and the relay between content scripts and the offscreen OCR engine.
 import { getSettings } from "./lib/settings.js";
+import { ocrScopeFor } from "./engine/gate.js";
 
 // Classic content scripts, loaded in this order into one isolated world.
 export const CONTENT_FILES = ["content/page-finder.js", "content/layout.js", "content/overlay.js", "content/status.js", "content/main.js"];
@@ -134,13 +135,12 @@ async function noteMissingHost(tabId, host) {
   await chrome.storage.session.set({ missingHosts });
 }
 
-// "all": OCR every bubble as soon as the page is detected; "none": only bubbles the user hovers.
+// "all": OCR every bubble as soon as the page is detected; "none": only bubbles the user hovers; "auto": the speed
+// is not measured yet, so the engine decides after the measurement (engine/gate.js).
 async function ocrScope() {
   const { perfMode } = await getSettings();
-  if (perfMode === "prefetch") return "all";
-  if (perfMode === "on-demand") return "none";
   const { modelStatus } = await chrome.storage.session.get("modelStatus");
-  return modelStatus && modelStatus.mode === "on-demand" ? "none" : "all";
+  return ocrScopeFor(perfMode, modelStatus && modelStatus.mode);
 }
 
 // Under Chrome's 64 MB limit for one message, which also carries the envelope.
