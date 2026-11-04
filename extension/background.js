@@ -137,12 +137,22 @@ async function ocrScope() {
   return modelStatus && modelStatus.mode === "on-demand" ? "none" : "all";
 }
 
-async function processImage(msg, sender) {
-  const tabId = sender.tab && sender.tab.id;
+// Under Chrome's 64 MB limit for one message, which also carries the envelope.
+const MAX_DATA_URL = 48 * 1024 * 1024;
+
+async function processImage(msg) {
+  // The content script already loaded the image the way the page does (its Referer, cookies). Those bytes come from a
+  // page of a site the user enabled, so no host permission is needed. Same bytes as a fetch, so the same page id.
+  if (msg.dataUrl !== undefined) {
+    if (typeof msg.dataUrl !== "string" || !msg.dataUrl.startsWith("data:") || msg.dataUrl.length > MAX_DATA_URL) {
+      return { ok: false, error: "bad_image" };
+    }
+    return engineCall({ type: "eng:page", source: { dataUrl: msg.dataUrl }, ocr: await ocrScope() });
+  }
   const url = new URL(msg.imageUrl);
+  if (url.protocol !== "http:" && url.protocol !== "https:") return { ok: false, error: "fetch_failed" }; // e.g. blob:
   const pattern = `${url.protocol}//${url.host}/*`;
   if (!(await chrome.permissions.contains({ origins: [pattern] }))) {
-    await noteMissingHost(tabId, url.host);
     return { ok: false, error: "no_image_permission", host: url.host };
   }
   return engineCall({ type: "eng:page", source: { url: msg.imageUrl }, ocr: await ocrScope() });
@@ -203,19 +213,43 @@ function pngWidth(dataUrl) {
   return ((head.charCodeAt(16) << 24) | (head.charCodeAt(17) << 16) | (head.charCodeAt(18) << 8) | head.charCodeAt(19)) >>> 0;
 }
 
+// A host[:port] as URL() writes it, with proper labels (no "..", "-", wildcards, paths or credentials).
+function validHost(host) {
+  if (typeof host !== "string" || host.includes("*")) return false;
+  try {
+    const u = new URL(`http://${host}`);
+    if (u.host !== host) return false;
+    return u.hostname.startsWith("[") || u.hostname.split(".").every((l) => /^[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?$/.test(l));
+  } catch {
+    return false;
+  }
+}
+
+async function blockCapture(tab) {
+  const { captureBlocked = {} } = await chrome.storage.session.get("captureBlocked");
+  captureBlocked[tab.id] = true;
+  await chrome.storage.session.set({ captureBlocked });
+}
+
 // Fallback for canvas pages / images we can't fetch: the offscreen document crops a screenshot of the element.
 async function captureElement(msg, sender) {
   const tab = sender.tab;
   if (!tab) return { ok: false, error: "no_tab" };
+  if (msg.probe) {
+    // Asked before the first screenshot, so a missing permission shows up at once instead of when the page is in view.
+    if (await chrome.permissions.contains({ origins: ["<all_urls>"] })) return { ok: true };
+    await blockCapture(tab);
+    return { ok: false, error: "capture_failed" };
+  }
   let dataUrl;
   try {
     dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
   } catch (e) {
-    const { captureBlocked = {} } = await chrome.storage.session.get("captureBlocked");
-    captureBlocked[tab.id] = true;
-    await chrome.storage.session.set({ captureBlocked });
+    await blockCapture(tab);
     return { ok: false, error: "capture_failed", detail: String(e.message || e) };
   }
+  // The page may move again while the engine works; the tab only needs to know when the pixels were taken.
+  if (msg.id != null) chrome.tabs.sendMessage(tab.id, { type: "am:capture-taken", id: msg.id }, { frameId: sender.frameId }).catch(() => {});
   const { x, y, width, height } = msg.rect;
   const scale = pngWidth(dataUrl) / msg.viewportWidth; // device pixels per CSS pixel in the capture
   return engineCall({ type: "eng:page", source: { dataUrl, crop: { x, y, width, height, scale } }, ocr: await ocrScope() });
@@ -254,6 +288,11 @@ const handlers = {
   "am:enable-site": (msg) => enableSite(msg.origin, msg.tabId).then(() => ({ ok: true })),
   "am:disable-site": (msg) => disableSite(msg.origin, msg.tabId).then(() => ({ ok: true })),
   "am:page": processImage,
+  // The content script knows the image is a manga page that its host permission is missing for (the panel lists the hosts).
+  "am:missing-host": async (msg, sender) => {
+    if (sender.tab && validHost(msg.host)) await noteMissingHost(sender.tab.id, msg.host);
+    return { ok: true };
+  },
   "am:capture": captureElement,
   "am:watch": async (msg, sender) => {
     if (sender.tab) await watchPage(sender.tab.id, msg.pageId);
