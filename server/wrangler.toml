@@ -5,6 +5,8 @@ compatibility_date = "2026-10-01"
 [vars]
 DAILY_PER_INSTALL = "100"
 DAILY_PER_IP = "300"
+# Refusals (the model declined a line) are paid but uncached, so they have their own per-IP daily ceiling.
+DAILY_REFUSALS_PER_IP = "20"
 MONTHLY_CAP_USD = "10"
 # USD per token, DeepSeek Flash at PEAK rates (the dearer ones, so the cap errs on the safe side).
 # Source: https://api-docs.deepseek.com/quick_start/pricing (checked 2026-11-01), per 1M tokens:

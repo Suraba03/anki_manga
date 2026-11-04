@@ -14,6 +14,7 @@ const MONTH = "2026-11";
 const CONFIG = {
   DAILY_PER_INSTALL: 100,
   DAILY_PER_IP: 300,
+  DAILY_REFUSALS_PER_IP: 20,
   MONTHLY_CAP_USD: 10,
   PRICE_IN_HIT: 0.000001,
   PRICE_IN_MISS: 0.00001,
@@ -457,7 +458,7 @@ test("prose instead of JSON is 422 explanation_refused: spend charged, no quota,
   assert.ok(Math.abs((await db.getSpend(MONTH)) - COST) < 1e-12);
   assert.equal(db.cache.size, 0);
   assert.equal(db.installs.size, 0);
-  assert.equal(db.ips.size, 0);
+  assert.equal(db.ips.has(`${DAY}|iphash`), false); // the normal per-IP counter; the refusal counter is tested below
 });
 
 test("finish_reason content_filter is 422 explanation_refused even with empty content", async () => {
@@ -486,4 +487,101 @@ test("a refusal is logged by kind, without the model's text", async () => {
   const logged = errors.mock.calls.map((c) => c.arguments.join(" ")).join("\n");
   assert.match(logged, /refused/);
   assert.doesNotMatch(logged, /SECRET/);
+});
+
+// ---- refusals are paid calls: a per-IP daily ceiling ----
+
+const REFUSE = async () => ({ result: "I can't help with that.", usage: USAGE, finishReason: "stop" });
+const REFUSED_KEY = `${DAY}|refused:iphash`;
+
+test("a refusal counts against the IP's refusal counter only: not the normal IP counter, not the install", async () => {
+  const { db, ctx } = setup({ callLlm: REFUSE });
+  assert.equal((await handleExplain(body(), ctx)).status, 422);
+  assert.equal(db.ips.get(REFUSED_KEY), 1);
+  assert.equal(db.ips.size, 1);
+  assert.equal(db.installs.size, 0);
+  assert.equal(db.cache.size, 0);
+});
+
+test("the 21st refusal from one IP in a day is 429 free_daily_limit, and the LLM is not called", async () => {
+  const { db, calls, ctx } = setup();
+  const refusing = { ...ctx, callLlm: async (t) => (calls.push(t), REFUSE()) };
+  for (let i = 0; i < 20; i++) assert.equal((await handleExplain(body(), refusing)).status, 422, `request ${i + 1}`);
+  assert.equal(calls.length, 20);
+  const spent = await db.getSpend(MONTH);
+  const r = await handleExplain(body(), refusing);
+  assert.equal(r.status, 429);
+  assert.deepEqual(r.json, { error: "free_daily_limit" });
+  assert.equal(calls.length, 20);
+  assert.equal(await db.getSpend(MONTH), spent);
+  assert.equal(db.ips.get(REFUSED_KEY), 20);
+});
+
+test("the refusal ceiling is DAILY_REFUSALS_PER_IP", async () => {
+  const { calls, ctx } = setup();
+  const refusing = { ...ctx, config: { ...CONFIG, DAILY_REFUSALS_PER_IP: 2 }, callLlm: async (t) => (calls.push(t), REFUSE()) };
+  assert.equal((await handleExplain(body(), refusing)).status, 422);
+  assert.equal((await handleExplain(body(), refusing)).status, 422);
+  assert.equal((await handleExplain(body(), refusing)).status, 429);
+  assert.equal(calls.length, 2);
+});
+
+test("a blocked IP blocks any line and any install, but another IP is unaffected", async () => {
+  const { db, calls, ctx } = setup();
+  db.ips.set(REFUSED_KEY, 20);
+  const r = await handleExplain(body({ install_id: ID2, text: "さようなら" }), ctx);
+  assert.equal(r.status, 429);
+  assert.equal(r.json.error, "free_daily_limit");
+  assert.equal(calls.length, 0);
+  const other = await handleExplain(body(), { ...ctx, ipHash: "other-iphash" });
+  assert.equal(other.status, 200);
+  assert.equal(calls.length, 1);
+});
+
+test("the refusal counter resets on the next UTC day", async () => {
+  const { db, ctx } = setup();
+  db.ips.set(REFUSED_KEY, 20);
+  const r = await handleExplain(body(), { ...ctx, now: new Date("2026-11-02T00:00:01Z") });
+  assert.equal(r.status, 200);
+});
+
+test("successful explanations do not touch the refusal counter", async () => {
+  const { db, ctx } = setup();
+  for (const text of ["いち", "に", "さん"]) assert.equal((await handleExplain(body({ text }), ctx)).status, 200);
+  assert.deepEqual([...db.ips.keys()], [`${DAY}|iphash`]);
+  assert.equal(db.ips.get(`${DAY}|iphash`), 3);
+});
+
+test("a rejected (non-refusal) answer is not counted as a refusal", async () => {
+  const { db, ctx } = setup({ callLlm: async () => ({ result: CUT, usage: USAGE, finishReason: "length" }) });
+  assert.equal((await handleExplain(body(), ctx)).status, 502);
+  assert.equal(db.ips.size, 0);
+});
+
+test("a cached line is still served to an IP at its refusal ceiling", async () => {
+  const { db, calls, ctx } = setup();
+  assert.equal((await handleExplain(body(), ctx)).status, 200);
+  db.ips.set(REFUSED_KEY, 20);
+  const r = await handleExplain(body(), ctx);
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json, { result: PARSED });
+  assert.equal(calls.length, 1);
+});
+
+test("the refusal log carries neither the line nor the IP hash", async () => {
+  const { ctx } = setup({ ipHash: "iphash-secret", callLlm: REFUSE });
+  await handleExplain(body({ text: "SECRET-LINE" }), ctx);
+  const logged = errors.mock.calls.map((c) => c.arguments.join(" ")).join("\n");
+  assert.match(logged, /refused/);
+  assert.doesNotMatch(logged, /SECRET-LINE|iphash-secret/);
+});
+
+test("parseConfig: DAILY_REFUSALS_PER_IP is read like the other limits and defaults to 20", () => {
+  const env = {
+    DAILY_PER_INSTALL: "100", DAILY_PER_IP: "300", MONTHLY_CAP_USD: "10",
+    PRICE_IN_HIT: "6e-9", PRICE_IN_MISS: "3e-7", PRICE_OUT: "1.2e-6",
+  };
+  assert.equal(parseConfig(env).DAILY_REFUSALS_PER_IP, 20);
+  assert.equal(parseConfig({ ...env, DAILY_REFUSALS_PER_IP: "5" }).DAILY_REFUSALS_PER_IP, 5);
+  assert.throws(() => parseConfig({ ...env, DAILY_REFUSALS_PER_IP: "lots" }));
 });

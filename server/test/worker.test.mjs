@@ -291,6 +291,49 @@ test("a refused line reaches the extension as 422 explanation_refused with CORS"
   assert.deepEqual(await res.json(), { error: "explanation_refused" });
 });
 
+// A D1 stand-in that interprets just the ip_counts statements; every other table reads as empty.
+function ipCountsD1() {
+  const ipRows = new Map();
+  const log = [];
+  return {
+    ipRows, log,
+    prepare: (sql) => ({
+      bind: (...args) => ({
+        first: async () => (log.push({ sql, args }), /FROM ip_counts/.test(sql) ? (ipRows.has(args.join("|")) ? { n: ipRows.get(args.join("|")) } : null) : null),
+        run: async () => {
+          log.push({ sql, args });
+          if (/INSERT INTO ip_counts/.test(sql)) ipRows.set(args.join("|"), (ipRows.get(args.join("|")) ?? 0) + 1);
+        },
+      }),
+    }),
+  };
+}
+
+test("refusals are kept in ip_counts under a refused: key: the 21st from one IP is 429 without a paid call", async () => {
+  const d1 = ipCountsD1();
+  let paidCalls = 0;
+  const llm = async () => (paidCalls++, { result: "I can't help with that.", usage: {}, finishReason: "stop" });
+  const env = { ...ENV, DB: d1 };
+  const now = new Date("2026-11-01T00:00:00Z");
+  for (let i = 0; i < 20; i++) assert.equal((await handle(req(), env, { callLlm: llm, now })).status, 422);
+  const blocked = await handle(req(), env, { callLlm: llm, now });
+  assert.equal(blocked.status, 429);
+  assert.deepEqual(await blocked.json(), { error: "free_daily_limit" });
+  assert.equal(paidCalls, 20);
+
+  const hash = createHash("sha256").update("salt203.0.113.9").digest("hex");
+  assert.deepEqual([...d1.ipRows], [[`2026-11-01|refused:${hash}`, 20]]);
+  assert.ok(!d1.log.some((e) => e.args.some((a) => String(a).includes("203.0.113.9"))), "no raw IP reaches D1");
+
+  const other = await handle(req({ headers: { "CF-Connecting-IP": "198.51.100.1" } }), env, { callLlm: llm, now });
+  assert.equal(other.status, 422);
+});
+
+test("wrangler.toml sets DAILY_REFUSALS_PER_IP next to the other limits", () => {
+  const toml = readFileSync(new URL("../wrangler.toml", import.meta.url), "utf8");
+  assert.match(toml, /^DAILY_REFUSALS_PER_IP = "20"$/m);
+});
+
 const STORE_ORIGIN = "chrome-extension://bgfnpifeeclmpfdcahphaiahgafjppeo";
 // Temporary: the owner's unpacked development builds (lane A and lane B checkouts), to be removed later.
 const DEV_ORIGINS = ["chrome-extension://aimemjiaackefknhadaljaoneahoaefd", "chrome-extension://mbcjdgjmpgkoiccnblkhkfjpdaclgihm"];

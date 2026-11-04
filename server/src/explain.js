@@ -5,6 +5,7 @@ import { PROMPT_VERSION, SYSTEM_PROMPT, parseExplanation, isRefusal } from "../.
 export const MAX_TEXT_CHARS = 300;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const NUMBER_VARS = ["DAILY_PER_INSTALL", "DAILY_PER_IP", "MONTHLY_CAP_USD", "PRICE_IN_HIT", "PRICE_IN_MISS", "PRICE_OUT"];
+const DEFAULT_REFUSALS_PER_IP = 20;
 const WARN_FRACTION = 0.8;
 const MAX_OUTPUT_TOKENS = 700; // the max_tokens worker.js sends
 
@@ -16,6 +17,10 @@ export function parseConfig(env) {
     if (env[name] === undefined || env[name] === "" || !Number.isFinite(n)) throw new Error(`bad config var ${name}`);
     config[name] = n;
   }
+  // Refusals are paid calls too, so they have their own daily ceiling per IP; the var is optional.
+  const refusals = env.DAILY_REFUSALS_PER_IP === undefined || env.DAILY_REFUSALS_PER_IP === "" ? DEFAULT_REFUSALS_PER_IP : Number(env.DAILY_REFUSALS_PER_IP);
+  if (!Number.isFinite(refusals)) throw new Error("bad config var DAILY_REFUSALS_PER_IP");
+  config.DAILY_REFUSALS_PER_IP = refusals;
   return config;
 }
 
@@ -84,7 +89,14 @@ export async function handleExplain(body, { db, callLlm, now, ipHash, origin, co
   const hit = await db.getCache(key);
   if (hit) return reply(200, { result: hit }, remainingHeader(config.DAILY_PER_INSTALL, installUsed));
 
-  if (installUsed >= config.DAILY_PER_INSTALL || (await db.countIp(day, ipHash)) >= config.DAILY_PER_IP) {
+  // Refusals are counted in ip_counts under their own key, so they never eat the normal per-IP allowance
+  // (the daily cron prunes them with the rest). They cost money but are not cached, so a script could repeat them.
+  const refusedKey = `refused:${ipHash}`;
+  if (
+    installUsed >= config.DAILY_PER_INSTALL ||
+    (await db.countIp(day, ipHash)) >= config.DAILY_PER_IP ||
+    (await db.countIp(day, refusedKey)) >= config.DAILY_REFUSALS_PER_IP
+  ) {
     return err(429, "free_daily_limit");
   }
   const spentBefore = await db.getSpend(month);
@@ -122,8 +134,10 @@ export async function handleExplain(body, { db, callLlm, now, ipHash, origin, co
       describeError(e),
       `finish_reason=${out?.finishReason ?? "?"} content_chars=${len}`,
     );
-    await charge(out?.usage); // paid, but no quota use and nothing cached
-    return refused ? err(422, "explanation_refused") : err(502, "free_unavailable");
+    await charge(out?.usage); // paid, but no install/IP quota use and nothing cached
+    if (!refused) return err(502, "free_unavailable");
+    await db.incIp(day, refusedKey);
+    return err(422, "explanation_refused");
   }
 
   await charge(out.usage);
