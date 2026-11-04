@@ -87,15 +87,42 @@ export const cardDoneState = (outcome) => (outcome === "added" ? { label: "✓ a
 
 export const NO_DECK = "Pick an Anki deck in Settings first.";
 
-// The deck cards go to is the user's choice, never a guess: a saved deck is used while Anki still has it; otherwise
-// nothing is saved until the user confirms "manga mining" (preselected when it exists), picks a deck, or creates
-// "manga mining". -> {selected, saved, offer: "use" | "create" | null, missing: the saved deck Anki no longer has}
+// The deck cards go to is the user's choice, never a guess. resolveDeck says which saved deck is in force: the one
+// for this site, else the last one picked, as long as Anki has it. Nothing is ever deleted from storage because Anki's
+// list lacks a deck (Anki may be on another profile or still loading). -> {deck: the one to use | null, missing: the
+// site or last deck Anki does not have, for the message | null}
+export function resolveDeck(decks, origin, names) {
+  const saved = [...new Set([origin && decks?.[origin], decks?._last].filter(Boolean))];
+  const deck = saved.find((d) => names.includes(d)) ?? null;
+  const missing = saved.find((d) => !names.includes(d) && (deck === null || saved.indexOf(d) < saved.indexOf(deck))) ?? null;
+  return { deck, missing };
+}
+
+// What the settings offer for the deck resolveDeck found (null: none in force): nothing saved is touched until the user
+// confirms "manga mining" (preselected when it exists), picks a deck, or creates "manga mining".
+// -> {selected, offer: "use" | "create" | null}
 export const DEFAULT_DECK = "manga mining";
-export function deckChoice(names, saved) {
-  if (saved && names.includes(saved)) return { selected: saved, saved: true, offer: null, missing: null };
-  const missing = saved || null;
-  if (names.includes(DEFAULT_DECK)) return { selected: DEFAULT_DECK, saved: false, offer: "use", missing };
-  return { selected: null, saved: false, offer: "create", missing };
+export function deckChoice(names, deck) {
+  if (deck && names.includes(deck)) return { selected: deck, offer: null };
+  if (names.includes(DEFAULT_DECK)) return { selected: DEFAULT_DECK, offer: "use" };
+  return { selected: null, offer: "create" };
+}
+
+// The deck a "+" sends to. checked: {origin, deck} from the last successful look at Anki's deck list (null before
+// one): for this site it decides, so a deck Anki lacked is never used. Without one (Anki unreachable so far),
+// the saved decks are read as they are.
+export function deckForCard(decks, origin, checked) {
+  if (checked && checked.origin === origin) return checked.deck;
+  return (origin && decks?.[origin]) || decks?._last || null;
+}
+
+// Overlapping async calls: each next() gets an isCurrent() that turns false once a newer call started.
+export function latestCall() {
+  let n = 0;
+  return () => {
+    const mine = ++n;
+    return () => mine === n;
+  };
 }
 
 // The line above the entries, next to every "+": where a card goes.

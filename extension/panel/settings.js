@@ -1,6 +1,6 @@
 // The settings drawer: deck, explanation source (free / own key), text-recognition mode, delete data.
 import { getSettings, setSettings } from "../lib/settings.js";
-import { freeLeftText, ankiErrorMessage, ownKeyCheck, llmModeAfter, validateBaseUrl, deckChoice, deckTargetText, DEFAULT_DECK } from "./logic.js";
+import { freeLeftText, ankiErrorMessage, ownKeyCheck, llmModeAfter, validateBaseUrl, resolveDeck, deckChoice, deckForCard, deckTargetText, latestCall, DEFAULT_DECK } from "./logic.js";
 import { deckNames, createDeck, forgetKnown } from "./anki.js";
 import { engine } from "./engine.js";
 import { state } from "./state.js";
@@ -8,22 +8,18 @@ import { state } from "./state.js";
 const $ = (id) => document.getElementById(id);
 
 // --- deck ---------------------------------------------------------------------------
+const savedDecks = async () => (await chrome.storage.local.get("decks")).decks || {};
+
+// The deck "+" and the deck line use: what the last look at Anki's deck list found for this site, or, before one,
+// what is saved. Nothing is ever deleted from storage because Anki's list lacks a deck.
 export async function currentDeck() {
-  const decks = (await chrome.storage.local.get("decks")).decks || {};
-  return (state.origin && decks[state.origin]) || decks._last || null;
+  return deckForCard(await savedDecks(), state.origin, state.deckChecked);
 }
 
 async function saveDeck(deck) {
-  const decks = (await chrome.storage.local.get("decks")).decks || {};
+  const decks = await savedDecks();
   if (state.origin) decks[state.origin] = deck;
   decks._last = deck;
-  await chrome.storage.local.set({ decks });
-}
-
-// A saved deck that Anki no longer has: forgotten (for this site and as the last one), so "+" asks for a choice.
-async function forgetDeck(deck) {
-  const decks = (await chrome.storage.local.get("decks")).decks || {};
-  for (const key of Object.keys(decks)) if (decks[key] === deck) delete decks[key];
   await chrome.storage.local.set({ decks });
 }
 
@@ -36,36 +32,53 @@ export async function showDeckTarget() {
 
 async function chooseDeck(deck) {
   await saveDeck(deck);
+  state.deckChecked = { origin: state.origin, deck }; // the user just picked it from Anki's own list, or created it
   forgetKnown(deck);
   await loadDecks();
 }
 
+// Entries already on screen grey out the words the new deck has (entries.js listens).
+export const DECK_CHANGED = "am:deck-changed";
+
+const nextDeckLoad = latestCall();
+
 // userAction: true from the "Connect to Anki" button; events (tab changes) never re-ask after a denial.
-// Nothing is saved here: see deckChoice. A deck is saved only when the user picks one, confirms or creates it.
+// Nothing is saved here: see resolveDeck and deckChoice. A deck is saved only when the user picks one, confirms or
+// creates it. Overlapping calls (a tab change during a click): only the newest paints.
 export async function loadDecks({ userAction = false } = {}) {
+  const isCurrent = nextDeckLoad();
   const select = $("deck");
   try {
     const names = await deckNames({ userAction });
+    const decks = await savedDecks();
+    if (!isCurrent()) return;
+    const { deck, missing } = resolveDeck(decks, state.origin, names);
+    const choice = deckChoice(names, deck);
+    const before = state.deckChecked?.deck ?? null;
+    state.deckChecked = { origin: state.origin, deck };
     $("anki-connect").hidden = true;
-    const saved = await currentDeck();
-    const choice = deckChoice(names, saved);
-    if (choice.missing) await forgetDeck(choice.missing);
     const options = names.map((d) => new Option(d, d, false, d === choice.selected));
     if (!choice.selected) options.unshift(Object.assign(new Option("Choose a deck…", "", true, true), { disabled: true }));
     select.replaceChildren(...options);
     $("deck-use").hidden = choice.offer !== "use";
-    $("deck-use").textContent = `Use “${choice.selected}”`;
+    if (choice.offer === "use") $("deck-use").textContent = `Use “${choice.selected}”`;
     $("deck-create").hidden = choice.offer !== "create";
-    const gone = choice.missing ? `“${choice.missing}” is no longer in Anki. ` : "";
+    const gone = missing ? `“${missing}” is no longer in Anki. ` : "";
     $("deck-state").textContent =
       choice.offer === "use" ? `${gone}Cards will go to “${DEFAULT_DECK}” once you confirm it.`
       : choice.offer === "create" ? `${gone}Choose a deck for your cards, or create “${DEFAULT_DECK}”.`
+      : gone ? `${gone}Cards go to “${deck}”.`
       : "";
+    await showDeckTarget();
+    if (before !== deck) document.dispatchEvent(new Event(DECK_CHANGED));
   } catch (e) {
+    if (!isCurrent()) return;
     $("deck-state").textContent = ankiErrorMessage(e.kind || "anki_error", e.kind ? "" : e.message);
+    $("deck-use").hidden = true;
+    $("deck-create").hidden = true;
     $("anki-connect").hidden = false;
+    await showDeckTarget();
   }
-  await showDeckTarget();
 }
 
 // --- explanations: free or own key ----------------------------------------------------

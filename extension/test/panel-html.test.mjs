@@ -32,5 +32,18 @@ test("an added card is green at full opacity, not greyed like a disabled button"
 test("deck: Settings has buttons to confirm or create the deck; the line naming it sits right above the entries", () => {
   assert.match(html, /<button id="deck-use" class="btn" type="button" hidden>/);
   assert.match(html, /<button id="deck-create" class="btn" type="button" hidden>Create “manga mining”<\/button>/);
-  assert.match(html, /<p id="deck-target" class="deck-target"[^>]*><\/p>\s*<main id="entries">/);
+  assert.match(html, /<button id="deck-target" class="deck-target" type="button" title="[^"]*"><\/button>\s*<main id="entries">/);
+});
+
+test("deck: the deck line is a real button, styled as small text", () => {
+  const rule = css.match(/\.deck-target\s*\{([^}]*)\}/)[1];
+  assert.match(rule, /background:\s*none/);
+  assert.match(rule, /border:\s*0|border:\s*none/);
+  assert.match(rule, /font-size:\s*12px/);
+});
+
+test("deck: the select is named by its label alone; the state is announced politely", () => {
+  assert.match(html, /<label for="deck">Anki deck for this site<\/label>\s*<select id="deck">/);
+  assert.match(html, /<span id="deck-state" class="hint" aria-live="polite">/);
+  assert.doesNotMatch(html, /<label[^>]*>[^<]*(?:<(?!\/label)[^>]*>[^<]*)*<select id="deck"/, "the select is not nested in a label");
 });

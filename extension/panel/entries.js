@@ -8,7 +8,7 @@ import { cardFields } from "../lib/cards.js";
 import { explainErrorMessage, ankiErrorMessage, pictureFilename, freeRemainingAfterError, waitForBubbleText, cardDoneState, DICT_UNAVAILABLE, NO_DECK } from "./logic.js";
 import { engine } from "./engine.js";
 import { ankiForCards, knownWords } from "./anki.js";
-import { currentDeck, openOwnKey } from "./settings.js";
+import { currentDeck, openOwnKey, DECK_CHANGED } from "./settings.js";
 
 const $ = (id) => document.getElementById(id);
 const MAX_ENTRIES = 30;
@@ -55,12 +55,48 @@ function markDone(row, btn, outcome) {
   btn.dataset.done = "1";
 }
 
-// Greys out a row whose word the deck already has (once the deck's known words have arrived).
-function greyIfKnown(ctx, row, btn, card) {
+// The deck's known words, loaded in the background (Anki may ask permission, or not be running); null without a deck.
+function loadKnown(ctx) {
+  return currentDeck()
+    .then((deck) => (deck ? knownWords(deck) : null))
+    .catch((e) => {
+      if (e.kind && !ctx.knownErrShown) {
+        ctx.knownErrShown = true;
+        addMsg(ctx.el, ankiErrorMessage(e.kind, e.message));
+      }
+      return null;
+    });
+}
+
+// Every "+" row that may still need greying; the deck can be chosen after the entries were rendered.
+// Rows of entries that were dropped from the panel (MAX_ENTRIES) are forgotten.
+const greyRows = new Set();
+const dropGone = () => {
+  for (const r of greyRows) if (!r.ctx.el.isConnected) greyRows.delete(r);
+};
+
+function applyKnown({ ctx, row, btn, card }) {
   ctx.knownP.then((known) => {
     if (known && !btn.dataset.done && known.isKnown(card.word, card.reading)) markDone(row, btn, "in_deck");
   });
 }
+
+// Greys out a row whose word the deck already has (once the deck's known words have arrived).
+function greyIfKnown(ctx, row, btn, card) {
+  const r = { ctx, row, btn, card };
+  dropGone();
+  greyRows.add(r);
+  applyKnown(r);
+}
+
+// The deck changed (picked, confirmed, created): load its known words again and re-check the visible rows.
+function refreshKnown() {
+  dropGone();
+  const ctxs = new Set([...greyRows].map((r) => r.ctx));
+  for (const ctx of ctxs) ctx.knownP = loadKnown(ctx);
+  for (const r of greyRows) applyKnown(r);
+}
+document.addEventListener(DECK_CHANGED, refreshKnown);
 
 async function mine(ctx, card) {
   const deck = await currentDeck();
@@ -213,13 +249,7 @@ export async function explainSelection(sel) {
   ctx.tokens = b.tokens;
   renderSentence(ctx, jp);
 
-  // The deck's known words load in the background (Anki may ask permission, or not be running).
-  ctx.knownP = currentDeck()
-    .then((deck) => (deck ? knownWords(deck) : null))
-    .catch((e) => {
-      if (e.kind) addMsg(el, ankiErrorMessage(e.kind, e.message));
-      return null;
-    });
+  ctx.knownP = loadKnown(ctx);
 
   // 2) explanation: local cache, then the free tier or the user's own provider
   tr.textContent = "Explaining…";
