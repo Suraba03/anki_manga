@@ -1,4 +1,4 @@
-// Explains a clicked bubble: local cache first, then the owner's free-tier server or the user's own provider.
+// Explains a clicked bubble (only in the modes "free" and "own"): local cache first, then the owner's free-tier server or the user's own provider.
 import { PROMPT_VERSION, ExplainError, buildMessages, parseExplanation, isRefusal } from "./prompt.js";
 
 export const FREE_URL = "https://anki-manga-free.suraba03.workers.dev/explain"; // the free-tier server (server/, Cloudflare Worker)
@@ -113,6 +113,8 @@ async function attempt(text, key, { settings, store, fetch, freeUrl, timeoutMs, 
 // Never rejects. -> {ok:true, result, cached, remaining} | {ok:false, error}
 // onError(detail), optional: called once with the concrete cause of a failure (for the panel and the console).
 export async function explain(text, { settings, store, fetch, freeUrl, timeoutMs = DEFAULT_TIMEOUT_MS, onError }) {
+  // Fails closed: only "free" and "own" send anything. Checked before the cache and any request.
+  if (settings.llm.mode !== "free" && settings.llm.mode !== "own") return fail("explanations_off");
   if (typeof text !== "string" || !text.trim()) return fail("no_text");
   const key = await Promise.resolve().then(() => store.explanationKey(text)).catch(() => null);
   if (key) {

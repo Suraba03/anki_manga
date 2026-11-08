@@ -49,9 +49,12 @@
           <input id="model" type="text" autocomplete="off" placeholder="deepseek-flash">
         </label>
         <button id="save-own" class="btn" type="button">Save</button>
-        <span id="own-state" class="hint"></span>
+        <span id="own-state" class="hint" aria-live="polite"></span>
       </div>
-      <p class="hint">Only the text of the bubble you click is sent. Page images never leave your computer.</p>
+      <label class="choice"><input type="radio" name="llm-mode" value="off"> Off — no bubble text is sent</label>
+      <button id="delete-key" class="btn" type="button" hidden>Delete saved key</button>
+      <span id="llm-state" class="hint" aria-live="polite"></span>
+      <p id="llm-hint" class="hint" aria-live="polite"></p>
     </fieldset>
 
     <label class="field">Text recognition

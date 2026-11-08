@@ -26,6 +26,7 @@ const EXPLAIN_MESSAGES = {
   models_loading: ["The OCR models are still loading — try again in a moment.", null],
   text_pending: ["This bubble is still being read — click it again in a moment.", null],
   unknown_bubble: ["This bubble is no longer available — click it again.", null],
+  explanations_off: ["Explanations are off. Turn them on in Settings → Explanations.", null],
   refused: ["No explanation for this line: the model declined it. The text, readings and dictionary still work.", null],
 };
 const FREE_NOT_COUNTED = " It did not count toward your free limit.";
@@ -154,10 +155,15 @@ export function ownKeyCheck(stored, { provider, baseUrl, typedKey }) {
 }
 
 // The explanation mode after a settings event. It becomes "own" only once a key is saved (or already is).
+// Deleting the key from "own" turns explanations off: it never moves the text to the free server on its own.
 export function llmModeAfter(event, llm) {
   switch (event) {
     case "select_free":
       return "free";
+    case "select_off":
+      return "off";
+    case "delete_key":
+      return llm.mode === "own" ? "off" : llm.mode;
     case "select_own":
       return llm.apiKey ? "own" : llm.mode;
     case "save_own":
@@ -165,6 +171,26 @@ export function llmModeAfter(event, llm) {
     default: // open_own_key, save_own_refused
       return llm.mode;
   }
+}
+
+// Only "free" and "own" send bubble text; any other value (including a damaged one) counts as Off.
+export const explainingOn = (mode) => mode === "free" || mode === "own";
+
+// What goes where, for the hint under Explanations. mode: "free" | "own" | anything else reads as Off.
+export function explanationsHint(mode) {
+  if (mode === "own") return "The text of the bubble you click goes from your browser to your provider, with your API key. Page images are not uploaded.";
+  if (!explainingOn(mode)) return "No bubble text is sent. Reading, the dictionary and cards work without explanations.";
+  return "The text of the bubble you click, a random install ID and the prompt version go to the project's server, which asks DeepSeek. The server also sees your network address (for the daily limit). Page images are not uploaded.";
+}
+
+// "Delete saved key": null when not confirmed or there is no key; else the settings patch and the message to show.
+export function deleteKeyOutcome(llm, confirmed) {
+  if (!confirmed || !llm.apiKey) return null;
+  const mode = llmModeAfter("delete_key", llm);
+  return {
+    patch: { apiKey: "", mode },
+    message: mode !== llm.mode ? "Key deleted. Explanations are off until you choose Free or save a new key." : "Key deleted.",
+  };
 }
 
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);

@@ -17,11 +17,14 @@ test("welcome page: live status line driven by the panel's modelStatusLine (not 
   assert.doesNotMatch(js, /Downloading models/, "the copy lives in panel/logic.js only");
 });
 
-test("welcome page: why the download happens once, and that page images stay local", () => {
+test("welcome page: why the download happens once, and what is and is not sent", () => {
   assert.match(text, /OCR runs on your computer/);
-  assert.match(text, /about 340 MB/);
+  assert.match(text, /about 340 MB with WebGPU or about 190 MB on the CPU/);
   assert.match(text, /once/);
-  assert.match(text, /Page images never leave your computer/);
+  assert.match(text, /never uploads page images/);
+  assert.doesNotMatch(text, /never leave your computer/);
+  assert.match(text, /Explanations send the text of a bubble you click/);
+  assert.match(text, /unless you turn them Off/);
 });
 
 test("welcome page: the next step names the panel's real button", () => {

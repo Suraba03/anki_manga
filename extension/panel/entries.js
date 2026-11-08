@@ -5,7 +5,7 @@ import { getSettings } from "../lib/settings.js";
 import { openStore } from "../engine/store.js";
 import { rubyHtml } from "../lib/text.js";
 import { cardFields } from "../lib/cards.js";
-import { explainErrorMessage, ankiErrorMessage, pictureFilename, freeRemainingAfterError, waitForBubbleText, cardDoneState, DICT_UNAVAILABLE, NO_DECK } from "./logic.js";
+import { explainingOn, explainErrorMessage, ankiErrorMessage, pictureFilename, freeRemainingAfterError, waitForBubbleText, cardDoneState, DICT_UNAVAILABLE, NO_DECK } from "./logic.js";
 import { engine } from "./engine.js";
 import { ankiForCards, knownWords } from "./anki.js";
 import { currentDeck, openOwnKey, DECK_CHANGED } from "./settings.js";
@@ -251,7 +251,14 @@ export async function explainSelection(sel) {
 
   ctx.knownP = loadKnown(ctx);
 
-  // 2) explanation: local cache, then the free tier or the user's own provider
+  // 2) explanation: local cache, then the free tier or the user's own provider (not at all when Off)
+  const settings = await getSettings();
+  if (!explainingOn(settings.llm.mode)) {
+    tr.textContent = "";
+    tr.classList.remove("skeleton");
+    addMsg(el, explainErrorMessage("explanations_off").text, null);
+    return;
+  }
   tr.textContent = "Explaining…";
   tr.classList.add("skeleton");
   let cause = "";
@@ -259,7 +266,6 @@ export async function explainSelection(sel) {
     cause = d;
     console.warn("[anki_manga] explanation failed:", d);
   };
-  const settings = await getSettings();
   const r = await explain(ctx.text, { settings, store: await store(), fetch: (...a) => fetch(...a), freeUrl: FREE_URL, onError });
   tr.classList.remove("skeleton");
   if (!r.ok) {

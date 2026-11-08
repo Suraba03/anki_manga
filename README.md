@@ -8,7 +8,7 @@ Read Japanese manga in Chrome and turn speech bubbles into Anki cards with almos
 - **Click** a bubble to open the side panel. It shows the line with furigana, a dictionary entry for any word you click, a translation, a short explanation of *why it's written that way*, and the words worth learning.
 - **"+"** adds a rich card to Anki: the word, its reading and meaning, the bubble sentence with the word in bold, furigana, translation, grammar notes, a picture of the comic panel, and a link back to the page. Words already in your deck are greyed out.
 
-Everything runs inside the extension. There is nothing else to install: no helper program, no Python, no Terminal. Text recognition (OCR) is done on your computer with [manga-ocr](https://github.com/kha-white/manga-ocr) and comic-text-detector, **page images never leave your device**, and only the text of a bubble you click is sent out, to get an explanation.
+There is nothing else to install: no helper program, no Python, no Terminal. Text recognition (OCR) runs on your computer with [manga-ocr](https://github.com/kha-white/manga-ocr) and comic-text-detector, and **the extension never uploads page images**. Explanations use an online service (the project's free server, or your own provider with your key) and receive the text of a bubble you click, unless you set Explanations to **Off**; then no bubble text is sent.
 
 ---
 
@@ -33,7 +33,7 @@ Everything runs inside the extension. There is nothing else to install: no helpe
 ## What you need
 
 - **Google Chrome** 116 or newer (other Chromium browsers may work). A GPU with WebGPU makes text recognition faster; without it the extension falls back to the CPU automatically.
-- About **400 MB of disk space** for the models and the dictionary, downloaded once on first run.
+- About **400 MB of disk space** for the models and the dictionary, downloaded after installation (the dictionary on your first lookup).
 - **[Anki](https://apps.ankiweb.net/)** (desktop) with the **AnkiConnect** add-on, to add cards.
 - Optional: [Yomitan](https://yomitan.wiki/), if you want its popup dictionary on manga pages.
 - Optional: an API key from [DeepSeek](https://platform.deepseek.com/) or another OpenAI-compatible provider, if you don't want to use the free explanations.
@@ -65,7 +65,7 @@ The extension creates a note type called **Manga Mining (anki_manga)** in Anki b
 ## First run
 
 1. Click the extension icon. The side panel opens on the right.
-2. The status in the top-right corner of the panel goes `Downloading models… N%`, then `Loading models…`, then `Ready (WebGPU)` or `Ready (CPU)`. The first download takes a few minutes (about 350 MB with WebGPU, about 200 MB on the CPU, plus the 11 MB dictionary); later starts take a few seconds. Every file is checked against a SHA-256 hash, and what is downloaded is data only, never code.
+2. The status in the top-right corner of the panel goes `Downloading models… N%`, then `Loading models…`, then `Ready (WebGPU)` or `Ready (CPU)`. The first download takes a few minutes (about 340 MB with WebGPU, about 190 MB on the CPU; the 11 MB dictionary is fetched when you first look up a word); later starts take a few seconds. Every file is checked against a SHA-256 hash, and what is downloaded is data only, never code.
 3. Open **Settings** in the panel and pick the **Anki deck** new cards should go to. Anki must be open for the list to load. Click **Connect to Anki** if the panel asks, and accept the prompt in Anki.
 4. Open a chapter on your manga reader site and click **Enable on this site** in the panel. Chrome asks for access to **that site only**. Click **Allow**.
 5. Many sites load images from a separate image server. If the panel then shows a button like **Allow images from cdn.example.com**, click it once and allow.
@@ -94,7 +94,7 @@ You can sit through the model download while you read: bubbles are processed as 
 | Show or hide the hidden text layer (to check alignment) | **Alt+V** |
 | Stop using it on a site | Panel → **Disable on this site** |
 
-Readers that draw pages on a `<canvas>` instead of using images also work, through a screenshot fallback. The page has to be fully on screen, and Chrome asks once for permission to take screenshots.
+Readers that draw pages on a `<canvas>` instead of using images also work, through a screenshot fallback (also used for images that can't be downloaded). The page has to be fully on screen, and Chrome asks once for permission to take screenshots.
 
 **Settings → Text recognition** chooses between *Auto*, *Prefetch* (read every bubble in advance) and *On demand* (read a bubble when you hover it). *Auto* is fine for most people.
 
@@ -120,11 +120,12 @@ Cards are tagged `anki_manga`. You can restyle the card template in Anki (**Tool
 
 ## Explanations: free tier or your own key
 
-Choose in **Settings → Explanations**.
+Choose in **Settings → Explanations**. The hint under the options says where the text goes in the mode you picked.
 
-- **Free.** No account and no key. Up to 100 explanations per install per day (the panel shows how many are left today), paid for by the project owner within a monthly budget. When the day's limit or the month's budget runs out, the panel says so and offers to switch to your own key. Identical bubble texts are answered from a shared cache, so they don't count twice.
-- **Use my own API key.** Pick **DeepSeek** or **Custom (OpenAI-compatible)** (with a base URL; Chrome asks for permission to talk to that host once). Paste your key and, optionally, a model name (the default is `deepseek-flash`). The text of the bubble you click goes straight from your browser to your provider. Your key stays in the extension's storage on your device.
+- **Free.** No account and no key. Up to 100 explanations per install per day (the panel shows how many are left today), paid for by the project owner within a monthly budget. When the day's limit or the month's budget runs out, the panel says so and offers to switch to your own key. Identical bubble texts are answered from a shared cache, so they don't count twice. Each request carries the bubble text, a random install ID (pseudonymous, made on your device, not linked to a name or account) and the prompt version; the server also sees your network address and keeps only a salted hash of it for the limits.
+- **Use my own API key.** Pick **DeepSeek** or **Custom (OpenAI-compatible)** (with a base URL; Chrome asks for permission to talk to that host once). Paste your key and, optionally, a model name (the default is `deepseek-flash`). The text of the bubble you click goes straight from your browser to your provider. Your key is stored locally in the extension's storage and sent to your selected provider with each request, for authentication. **Delete saved key** (shown once a key is saved) removes it; if you were using your own key, explanations then switch to Off, not to the free server.
   - DeepSeek: sign up at [platform.deepseek.com](https://platform.deepseek.com/), top up a small balance, then **API keys → Create new API key** (it starts with `sk-`). One explanation is a few hundred tokens, a tiny fraction of a cent; see [DeepSeek pricing](https://api-docs.deepseek.com/quick_start/pricing).
+- **Off.** No bubble text is sent anywhere. Clicking a bubble still shows the furigana and the dictionary, and "+" still makes cards; only the translation and notes are missing. The models, the dictionary and page images still download as usual.
 
 Every answer is cached on your device, so clicking the same bubble again costs nothing and doesn't count against the free limit.
 
@@ -132,7 +133,7 @@ Every answer is cached on your device, so clicking the same bubble again costs n
 
 ## Dictionary
 
-The panel has an offline dictionary based on [JMdict](https://www.edrdg.org/jmdict/j_jmdict.html) (English glosses). It is downloaded together with the models and runs on your device. Click a word in the panel's sentence to see readings, parts of speech and meanings. Words are split with kuromoji. The dictionary is independent of Yomitan, which keeps working with its own dictionaries.
+The panel has an offline dictionary based on [JMdict](https://www.edrdg.org/jmdict/j_jmdict.html) (English glosses). It is downloaded the first time you look up a word (the models download after installation) and runs on your device. Click a word in the panel's sentence to see readings, parts of speech and meanings. Words are split with kuromoji. The dictionary is independent of Yomitan, which keeps working with its own dictionaries.
 
 ---
 
@@ -211,7 +212,7 @@ Leave the other fields empty. The panel fills them when you add from there. Beca
 | **Your DeepSeek account has no balance** | Top up on platform.deepseek.com. |
 | **The dictionary could not be loaded…** | Check your connection and click the word again. |
 
-Settings, the list of enabled sites and caches live in the browser. Settings → **Delete downloaded models and caches** clears the models and caches. Removing the extension removes everything. Your Anki cards stay.
+Settings, the saved API key, the list of enabled sites and caches live in the browser. Settings → **Delete downloaded models and caches** removes the downloaded models and dictionary and the caches of pages, recognized text and explanations (up to 300 stored page images, no time limit). It keeps your settings, the saved key (use **Delete saved key**), the list of enabled sites and your Anki data, and it does not touch data on the free server. Removing the extension removes all local data. Your Anki cards stay.
 
 Still stuck? [Open an issue](https://github.com/Suraba03/anki_manga/issues) with what the panel says.
 
@@ -221,10 +222,10 @@ Still stuck? [Open an issue](https://github.com/Suraba03/anki_manga/issues) with
 
 Full text: [docs/privacy.md](docs/privacy.md) (published at <https://suraba03.github.io/anki_manga/privacy>).
 
-- **Page images never leave your device.** Detection and OCR run in the browser.
-- **Only the text of a bubble you click is sent**, and only to get an explanation: to the project's free server (random install ID, no account), or straight to your own provider if you use your own key.
-- The free server stores a shared cache of explanations (bubble text and answer) and counters for the limits (per install ID, per salted hash of the address, per month). No page images, no URLs, no analytics, no tracking.
-- AnkiConnect is contacted only on `127.0.0.1`. Settings and keys stay in the browser on your device.
+- **The extension never uploads page images.** Detection and OCR run in the browser. Pictures you add to Anki cards are stored in Anki and follow your Anki sync settings (AnkiWeb sync uploads them if you use it).
+- **The text of a bubble you click is sent** only to get an explanation, and not at all if Explanations is **Off**. Free mode: the text, a pseudonymous random install ID and the prompt version go to the project's free server, which also sees your network address for the limits. Own key: the text goes straight to your provider, with your key.
+- The free server stores a shared cache of explanations (bubble text and answer) and counters for the limits (per install ID, per salted hash of the address, per month). No page images, no URLs, no analytics, no tracking. The server's own log lines contain no bubble text, install ID or address.
+- AnkiConnect is contacted only on `127.0.0.1`; besides adding cards, the extension reads the notes in your decks to grey out known words. Settings and your API key are stored in the browser on your device (the key is sent only to the provider you chose).
 
 ---
 
