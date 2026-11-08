@@ -40,7 +40,7 @@ function makeCanvas(rect = { left: 0, top: 0, width: 1000, height: 5000 }) {
 
 // replies: message type -> (msg) => reply. Returns the sandbox handles the tests need.
 // fetch: url -> truthy (a response) or throws; canvas: "ok" | "tainted" (what a canvas copy of an <img> gives).
-async function load({ imgs = [makeImg()], canvases = [], replies: given = {}, fetch: fetchImpl = () => { throw new TypeError("Failed to fetch"); }, canvas = "tainted", blobSize = 1000, trace = false, now = 0 } = {}) {
+async function load({ imgs = [makeImg()], canvases = [], replies: given = {}, fetch: fetchImpl = () => { throw new TypeError("Failed to fetch"); }, canvas = "tainted", blobSize = 1000, trace = false, now = 0, syncThrow = null } = {}) {
   const replies = { "am:page": () => ({ ok: true, page: page([null]) }), ...given };
   const sent = [];
   const timers = [];
@@ -149,10 +149,13 @@ async function load({ imgs = [makeImg()], canvases = [], replies: given = {}, fe
     // No chrome.storage on purpose: a content script must not read the settings (they hold the API key).
     chrome: {
       runtime: {
-        sendMessage: async (msg) => {
-          sent.push(msg);
-          const reply = replies[msg.type];
-          return reply ? reply(msg) : { ok: true };
+        sendMessage: (msg) => {
+          if (syncThrow && syncThrow(msg)) throw new Error("Extension context invalidated.");
+          return (async () => {
+            sent.push(msg);
+            const reply = replies[msg.type];
+            return reply ? reply(msg) : { ok: true };
+          })();
         },
         onMessage: { addListener: (fn) => listeners.push(fn) },
       },
@@ -898,6 +901,8 @@ test("priority: a page already beyond 2 viewports when its bytes are ready is no
   const seen = env.observeLog.length;
   await env.intersect(img, {});
   assert.equal(env.ofType("am:page").length, 0);
+  assert.equal(env.observeLog.length, seen, "not at once (see the backoff test)");
+  await env.fire(250);
   assert.equal(env.observeLog.length, seen + 1, "the image is observed again");
   assert.equal(env.badges.get(img)?.state ?? null, null, "no badge, no error");
   // back near the screen: processed
@@ -913,6 +918,7 @@ test("deferred: the engine dropped the request -> no badge, no error, forgotten,
   const seen = env.observeLog.length;
   await env.intersect(img, {});
   assert.equal(env.ofType("am:page").length, 1);
+  await env.fire(250);
   assert.equal(env.observeLog.length, seen + 1);
   assert.ok(!env.badges.get(img) || env.badges.get(img).state === null, "the 'finding bubbles' badge is gone");
   assert.equal(env.ofType("am:missing-host").length, 0);
@@ -979,4 +985,164 @@ test("priority: reports are numbered so that a reloaded page's first report is n
   const after = await load({ now: 2000, fetch: () => true });
   await after.intersect(after.imgs[0], {});
   assert.ok(after.ofType("am:page")[0].priority.n > before.ofType("am:page")[0].priority.n);
+});
+
+// --- review fixes ---------------------------------------------------------------------------------------------------
+test("priority: one n per report, however many items; the next report is newer, and n never falls behind the clock", async () => {
+  const imgs = [1, 2, 3].map((i) => makeImg(`https://cdn.example/p${i}.jpg`, at(100 * i)));
+  const env = await load({ imgs, fetch: () => true, now: 5000, replies: { "am:page": () => new Promise(() => {}) } }); // requests stay pending
+  for (const img of imgs) await env.intersect(img, {});
+  const sentN = env.ofType("am:page").map((m) => m.priority.n);
+  assert.deepEqual(sentN, [5001, 5002, 5003], "the clock stands still: +1 per report");
+  await env.scroll();
+  await env.fire(120);
+  const batch = env.ofType("am:priorities").at(-1).items;
+  assert.equal(new Set(batch.map((i) => i.n)).size, 1, "one n for the whole batch");
+  assert.equal(batch[0].n, 5004, "a batch of three used one number, not three");
+});
+
+test("priority: n follows the clock when it moves ahead of the counter", async () => {
+  const env = await load({ now: 1000, fetch: () => true });
+  await env.intersect(env.imgs[0], {});
+  assert.equal(env.ofType("am:page")[0].priority.n, 1001);
+});
+
+test("priority: a zero-size or hidden image ranks far (behind everything in the zone), but is not 'far' enough to be deferred", async () => {
+  const hidden = makeImg("https://cdn.example/h.jpg", { getBoundingClientRect: () => ({ left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0 }) });
+  const sliver = makeImg("https://cdn.example/s.jpg", at(100, 1));
+  const shown = makeImg("https://cdn.example/v.jpg", at(100));
+  const edge = makeImg("https://cdn.example/e.jpg", at(5800)); // 1.9 viewports below
+  const env = await load({ imgs: [hidden, sliver, shown, edge], fetch: () => true });
+  for (const img of env.imgs) await env.intersect(img, {});
+  const by = Object.fromEntries(env.ofType("am:page").map((m) => [m.imageUrl.slice(-5, -4), plain(m.priority)]));
+  assert.equal(by.h.d <= 2, true, "still sent");
+  assert.ok(by.h.p > by.e.p && by.s.p > by.e.p, "behind a page 1.9 viewports away");
+  assert.ok(by.h.p > by.v.p);
+});
+
+test("deferred: the image is observed again after a pause that grows with every deferral, so a page cannot loop at full speed", async () => {
+  const env = await load({ fetch: () => true, replies: { "am:page": () => ({ ok: false, error: "deferred" }) } });
+  const [img] = env.imgs;
+  const seen = env.observeLog.length;
+  await env.intersect(img, {});
+  assert.equal(env.observeLog.length, seen, "no immediate re-observe");
+  assert.equal(env.pendingTimers(250).length, 1);
+  await env.fire(250);
+  await env.intersect(img, {}); // fires at once, still deferred
+  assert.equal(env.pendingTimers(250).length, 0);
+  assert.equal(env.pendingTimers(1200).length, 1, "longer the second time");
+  await env.fire(1200);
+  await env.intersect(img, {});
+  assert.equal(env.pendingTimers(3500).length, 1);
+  assert.equal(env.ofType("am:page").length, 3);
+});
+
+test("deferred: a page beyond the zone is turned down before its bytes are fetched", async () => {
+  const img = makeImg("https://cdn.example/p1.jpg", at(9000));
+  const env = await load({ imgs: [img], fetch: () => true });
+  await env.intersect(img, {});
+  assert.deepEqual(env.fetched, [], "no fetch, no data URL");
+});
+
+test("priorities: only requests in flight and unfinished pages are reported, nearest first, at most 100", async () => {
+  // all below the screen (2000 px high), each 20 px farther than the one before
+  const imgs = Array.from({ length: 130 }, (_, i) => makeImg(`https://cdn.example/p${String(i).padStart(3, "0")}.jpg`, at(2100 + i * 20, 1000)));
+  const env = await load({ imgs, fetch: () => true, replies: { "am:page": () => new Promise(() => {}) } });
+  for (const img of [...imgs].reverse()) await env.intersect(img, {}); // arrival order is not distance order
+  await env.scroll();
+  await env.fire(120);
+  const items = plain(env.ofType("am:priorities").at(-1).items);
+  assert.equal(items.length, 100);
+  assert.deepEqual(items.map((i) => i.key), imgs.slice(0, 100).map((i) => i.src), "the 100 nearest, nearest first");
+});
+
+test("priorities: rects are measured only for pending pages, not for the finished ones of a long chapter", async () => {
+  let measured = 0;
+  const imgs = Array.from({ length: 300 }, (_, i) => makeImg(`https://cdn.example/q${i}.jpg`, { getBoundingClientRect: () => (measured++, { left: 0, top: 2100 + i * 10, width: 800, height: 1000, right: 800, bottom: 3100 + i * 10 }) }));
+  const finished = new Set(imgs.slice(150).map((i) => i.src)); // 150 pages that are completely done
+  const env = await load({
+    imgs,
+    fetch: () => true,
+    replies: { "am:page": (m) => (finished.has(m.imageUrl) ? { ok: true, page: { ...page([null]), page_id: m.imageUrl } } : new Promise(() => {})) },
+  });
+  for (const img of imgs) await env.intersect(img, {});
+  for (const url of finished) await env.message({ type: "am:bubble-text", pageId: url, bubbleId: 0, text: "あ" });
+  measured = 0;
+  await env.scroll();
+  await env.fire(120);
+  assert.equal(measured, 150);
+  assert.equal(env.ofType("am:priorities").at(-1).items.length, 100);
+});
+
+test("priorities: in on-demand mode a page whose engine work is done (bubbles known, texts only on hover) is not reported", async () => {
+  const a = makeImg("https://cdn.example/a.jpg", at(100));
+  const b = makeImg("https://cdn.example/b.jpg", at(1400));
+  const env = await load({
+    imgs: [a, b],
+    fetch: () => true,
+    replies: { "am:perf-mode": () => ({ ok: true, mode: "on-demand" }), "am:page": (m) => (m.imageUrl.endsWith("a.jpg") ? { ok: true, page: { ...page([null, null]), page_id: "A" } } : new Promise(() => {})) },
+  });
+  await env.intersect(a, { intersectionRatio: 1 });
+  await env.intersect(b, { intersectionRatio: 1 });
+  await env.scroll();
+  await env.fire(120);
+  assert.deepEqual(plain(env.ofType("am:priorities").at(-1).items).map((i) => i.key), ["https://cdn.example/b.jpg"]);
+});
+
+test("a throw from sendMessage itself (the extension was reloaded) is an extension_reloaded reply, not a cached rejected promise", async () => {
+  let broken = true;
+  const [a, b] = [makeImg("https://cdn.example/same.jpg", at(100)), makeImg("https://cdn.example/same.jpg", at(150))];
+  const env = await load({ imgs: [a, b], fetch: () => true, syncThrow: (m) => broken && m.type === "am:page" });
+  await env.intersect(a, {});
+  assert.equal(env.badges.get(a)?.state?.error, "extension_reloaded");
+  broken = false;
+  await env.intersect(b, {}); // the same page: must ask again, not reuse the failure
+  assert.equal(env.ofType("am:page").length, 1);
+  assert.equal(env.handles.length, 1);
+});
+
+test("a late failed reply does not remove a newer cached request of the same page", async () => {
+  const URL_ = "https://cdn.example/same.jpg";
+  const [b, a, c] = [makeImg(URL_, at(100)), makeImg(URL_, at(120)), makeImg(URL_, at(140))];
+  let calls = 0;
+  let releaseA;
+  const env = await load({
+    imgs: [b, a, c],
+    fetch: () => true,
+    replies: { "am:page": () => (++calls === 1 ? { ok: false, error: "models_downloading" } : calls === 2 ? new Promise((r) => (releaseA = r)) : new Promise(() => {})) },
+  });
+  await env.intersect(b, {}); // fails, retried in 2 s
+  await env.intersect(a, {}); // a new request, slow
+  await env.fire(2000); // b retries: its request replaces a's in the cache
+  releaseA({ ok: false, error: "no_manga" }); // a's late failure
+  await env.message({ type: "noop" }); // let it land
+  await env.intersect(c, {}); // must reuse b's request
+  assert.equal(env.ofType("am:page").length, 3);
+});
+
+// A carousel or a loading overlay moves pages without a scroll event; what the engine was told must follow.
+test("priorities: while requests are pending the report is repeated without any scroll, and only for pages whose rank changed", async () => {
+  const rects = { a: at(100), b: at(2100, 1000) };
+  const a = makeImg("https://cdn.example/a.jpg", { getBoundingClientRect: () => rects.a.getBoundingClientRect() });
+  const b = makeImg("https://cdn.example/b.jpg", { getBoundingClientRect: () => rects.b.getBoundingClientRect() });
+  const env = await load({ imgs: [a, b], fetch: () => true, replies: { "am:page": () => new Promise(() => {}) } });
+  await env.intersect(a, {});
+  await env.intersect(b, {});
+  await env.fire(120); // the first report, scheduled by the requests
+  assert.equal(env.ofType("am:priorities").length, 1);
+  await env.fire(400); // nothing moved: nothing to say
+  assert.equal(env.ofType("am:priorities").length, 1);
+  rects.a = at(6000, 1200); // the carousel slid the page away; no scroll event
+  await env.fire(400);
+  const last = plain(env.ofType("am:priorities").at(-1).items);
+  assert.deepEqual(last.map((i) => i.key), ["https://cdn.example/a.jpg"], "only the page that changed");
+  assert.ok(last[0].d > 1.9);
+});
+
+test("priorities: the repeat stops when nothing is pending", async () => {
+  const env = await load({ fetch: () => true });
+  await env.intersect(env.imgs[0], {}); // answered at once, no bubbles to wait for? one bubble without text: pending
+  await env.message({ type: "am:bubble-text", pageId: "P", bubbleId: 0, text: "あ" });
+  await env.fire(120);
+  assert.equal(env.pendingTimers(400).length, 0);
 });

@@ -86,7 +86,7 @@ export class OcrScheduler {
       while (this.jobs.size) {
         const rank = () => {
           const job = this.next();
-          return job ? this.rankOf(job) : Infinity;
+          return job ? this.rankOf(job) : -Infinity; // nothing left (clear()): the place leaves at once
         };
         await this.slot(rank, () => this.runNext());
       }

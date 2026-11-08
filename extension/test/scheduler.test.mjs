@@ -290,3 +290,19 @@ test("between two bubbles of the visible page, a queued detect of a farther page
   await new Promise((r) => setTimeout(r, 5));
   assert.deepEqual(log, ["bubble0", "bubble1", "bubble2", "detect of a neighbour"]);
 });
+
+test("a place left empty by clear() leaves the queue at once: it does not wait behind a queued detect", async () => {
+  const gate = new Gate();
+  const release = [];
+  gate.submit("detect", () => new Promise((r) => release.push(r)), { rank: () => 0 }); // running
+  const s = new OcrScheduler(async () => "t", () => {}, { slot: (rank, run) => gate.submit("ocr", run, { rank }) });
+  await new Promise((r) => setTimeout(r, 5));
+  s.enqueuePage("p", RGBA, mk(2));
+  await new Promise((r) => setTimeout(r, 5)); // its place is queued
+  gate.submit("detect", () => new Promise((r) => release.push(r)), { rank: () => 5 }); // a neighbour, far
+  s.clear();
+  release[0]();
+  const state = await Promise.race([s.idle().then(() => "idle"), new Promise((r) => setTimeout(() => r("stuck behind the detect"), 100))]);
+  assert.equal(state, "idle");
+  release[1]?.();
+});

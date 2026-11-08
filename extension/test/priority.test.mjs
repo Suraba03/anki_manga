@@ -6,18 +6,18 @@ import { Deferred } from "../engine/rank-gate.js";
 // a pick after a finished job happens one timer tick later (see Gate.start)
 const tick = () => new Promise((r) => setTimeout(r, 5));
 
-test("a key without a priority is as good as visible and never far", () => {
+test("a request without a key (a screenshot) is as good as visible; a key the table does not know ranks far but is never stale", () => {
   const p = new Priorities();
-  assert.equal(p.rankOfKey("k"), 0);
-  assert.equal(p.isFar("k"), false);
   assert.equal(p.rankOfKey(undefined), 0);
+  assert.ok(p.rankOfKey("k") > FAR, "unknown or evicted: behind every page in the zone");
+  assert.equal(p.isFar("k"), false);
 });
 
 test("set/update keep the newest report per key (by n) and ignore malformed items", () => {
   const p = new Priorities();
   p.update([{ key: "a", d: 0.5, p: 0.5, n: 2 }, { key: "a", d: 3, p: 3, n: 1 }, { key: "b", d: "x", p: 1, n: 1 }, null, { d: 1, p: 1, n: 1 }]);
   assert.equal(p.rankOfKey("a"), 0.5);
-  assert.equal(p.rankOfKey("b"), 0);
+  assert.ok(p.rankOfKey("b") > FAR); // malformed: not stored
   p.update([{ key: "a", d: 1, p: 1.25, n: 3 }]);
   assert.equal(p.rankOfKey("a"), 1.25);
   p.update("garbage");
@@ -39,7 +39,7 @@ test("a page id takes the priority of the request that made it; the hash of a ke
   assert.equal(p.rankOfPage("P1"), 0);
   assert.equal(p.rankOfPage("P2"), 1);
   assert.equal(p.rankOfPage("P3"), 0);
-  assert.equal(p.rankOfPage("unknown"), 0);
+  assert.ok(p.rankOfPage("unknown") > FAR, "a page id nobody bound ranks far");
   p.update([{ key: "http://x/2.png", d: 4, p: 4, n: 2 }]);
   assert.equal(p.rankOfPage("P2"), 4);
 });
@@ -110,4 +110,32 @@ test("slot(): the OCR turn follows the page rank and is not droppable", async ()
   const turn = q.slot(() => 0, async () => order.push("ocr"));
   await Promise.all([near, turn]);
   assert.deepEqual(order, ["ocr", "detect"]);
+});
+
+test("the priority an am:page request carries is authoritative for its key: it overwrites a report with a higher n", () => {
+  const q = readingQueues();
+  q.update([{ key: "k", d: 3, p: 3, n: 5000 }]); // e.g. left by an earlier tab or an earlier copy of the content script
+  assert.equal(q.request({ key: "k", priority: { d: 0, p: 0.1, n: 10 } }).rank(), 0.1);
+  assert.equal(q.request({ key: "k", priority: { d: 0, p: 0.1, n: 10 } }).stale(), false);
+  q.update([{ key: "k", d: 3, p: 3, n: 9 }]); // but a late periodic report still cannot beat it
+  assert.equal(q.request({}).rank(), 0);
+  assert.equal(q.priorities.rankOfKey("k"), 0.1);
+});
+
+test("n is clamped to a minute ahead of the clock, so a runaway counter cannot lock a key out", () => {
+  let now = 1_000_000;
+  const p = new Priorities({ now: () => now });
+  p.update([{ key: "k", d: 3, p: 3, n: 9e15 }]); // would win against every later report
+  now += 61000; // a minute later at the most the reports of a live tab are newer again
+  p.update([{ key: "k", d: 0, p: 0.2, n: now }]);
+  assert.equal(p.rankOfKey("k"), 0.2);
+});
+
+test("a key over 2000 characters is ignored (kept out of the tables); the request falls back to no key", () => {
+  const p = new Priorities();
+  const long = "http://x/" + "a".repeat(2100);
+  p.update([{ key: long, d: 1, p: 1, n: 1 }]);
+  assert.equal(p.byKey.size, 0);
+  p.bind("P", long);
+  assert.equal(p.rankOfPage("P"), 0);
 });

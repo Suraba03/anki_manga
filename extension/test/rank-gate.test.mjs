@@ -166,3 +166,35 @@ test("a dropped job is marked", async () => {
     delete globalThis.__amTrace;
   }
 });
+
+test("the slot is refilled without a timer: a throttled setTimeout (hidden documents) does not stall the queue", async () => {
+  const realSetTimeout = globalThis.setTimeout;
+  const g = new Gate();
+  const j = jobs();
+  g.submit("detect", j.make("a").run);
+  g.submit("detect", j.make("b").run);
+  await new Promise((r) => setImmediate(r));
+  globalThis.setTimeout = () => 0; // never fires
+  try {
+    j.finish("a");
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    assert.deepEqual(j.order, ["a", "b"]);
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+  }
+});
+
+test("a consumer of a finished job that submits the next one in its continuation still competes with what waits", async () => {
+  // the engine: a detect resolves, its caller enqueues the page's bubbles; they must be queued before the next pick
+  const g = new Gate();
+  const order = [];
+  const release = [];
+  g.submit("detect", () => new Promise((r) => release.push(r)), { rank: () => 0 });
+  g.submit("detect", async () => order.push("neighbour detect"), { rank: () => 0.7 });
+  const done = g.submit("detect", async () => 1, { rank: () => 0 }).then(() => g.submit("ocr", async () => order.push("ocr of the visible page"), { rank: () => 0 }));
+  await new Promise((r) => setImmediate(r));
+  release[0]();
+  await done;
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(order, ["ocr of the visible page", "neighbour detect"]);
+});

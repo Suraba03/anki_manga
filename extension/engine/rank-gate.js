@@ -5,6 +5,19 @@
 // Trace marks (tools/perf): queue:queued / start / end / dropped, each with the job id and kind.
 import { mark } from "./trace.js";
 
+// One macrotask, without a timer: timers are throttled in hidden documents (the offscreen one), a message is not.
+function nextTask() {
+  return new Promise((resolve) => {
+    if (typeof MessageChannel !== "function") return setTimeout(resolve, 0);
+    const { port1, port2 } = new MessageChannel();
+    port1.onmessage = () => {
+      port1.close();
+      resolve();
+    };
+    port2.postMessage(null);
+  });
+}
+
 export class Deferred extends Error {
   constructor() {
     super("deferred");
@@ -89,7 +102,7 @@ export class Gate {
       mark("queue:end", { id: job.id, kind: job.kind });
       // Not at once: whoever waited for this job may be about to submit the next one (the OCR scheduler takes a new turn per
       // bubble, a page enqueues its bubbles right after its detect), and that one must compete with what already waits.
-      setTimeout(() => this.pump(), 0);
+      nextTask().then(() => this.pump());
     }
   }
 }

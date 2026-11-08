@@ -8,24 +8,34 @@ export const MAX_READS = 3; // pages fetched and decoded at once
 const MAX_ENTRIES = 2000;
 const LIMIT = 1e6;
 const MAX_ITEMS = 500; // one report; a content script is not trusted with more
+const MAX_KEY = 2000; // a longer URL is not tracked
+const MAX_AHEAD_MS = 60000; // n is a clock-based counter: a report claiming to be further ahead than this is clamped
+export const UNKNOWN_RANK = FAR + 1; // a key the table does not know (never reported, or evicted): behind every page in the zone
 
 const finite = (x) => typeof x === "number" && Number.isFinite(x);
-const keyOf = (url) => (typeof url === "string" ? url.split("#")[0] : undefined);
+const keyOf = (url) => {
+  const key = typeof url === "string" ? url.split("#")[0] : undefined;
+  return key && key.length <= MAX_KEY ? key : undefined;
+};
 
 export class Priorities {
-  constructor({ max = MAX_ENTRIES } = {}) {
+  constructor({ max = MAX_ENTRIES, now = Date.now } = {}) {
     this.max = max;
+    this.now = now;
     this.byKey = new Map(); // page key -> {d, p, n}
     this.keyOfPage = new Map(); // page id -> page key
   }
 
-  set(key, pr) {
+  // force: the report that comes with a page request is the truth for that key at that moment, whatever n an earlier
+  // report (an earlier tab, an earlier copy of the content script) left behind. Periodic reports only move forward.
+  set(key, pr, { force = false } = {}) {
     key = keyOf(key);
     if (!key || !pr || !finite(pr.d) || !finite(pr.p) || !finite(pr.n)) return;
+    const n = Math.min(pr.n, this.now() + MAX_AHEAD_MS);
     const had = this.byKey.get(key);
-    if (had && had.n > pr.n) return;
+    if (!force && had && had.n > n) return;
     this.byKey.delete(key); // re-inserted last: the oldest go first when the map is trimmed
-    this.byKey.set(key, { d: Math.min(Math.max(pr.d, 0), LIMIT), p: Math.min(Math.max(pr.p, 0), LIMIT), n: pr.n });
+    this.byKey.set(key, { d: Math.min(Math.max(pr.d, 0), LIMIT), p: Math.min(Math.max(pr.p, 0), LIMIT), n });
     trim(this.byKey, this.max);
   }
 
@@ -35,20 +45,21 @@ export class Priorities {
   }
 
   bind(pageId, key) {
-    key = keyOf(key);
-    if (!pageId || !key) return;
+    if (!pageId) return;
     this.keyOfPage.delete(pageId);
-    this.keyOfPage.set(pageId, key);
+    this.keyOfPage.set(pageId, keyOf(key) ?? null); // null: no key (a screenshot of the screen), as good as visible
     trim(this.keyOfPage, this.max);
   }
 
   rankOfKey(key) {
-    const pr = this.byKey.get(keyOf(key));
-    return pr ? pr.p : 0;
+    key = keyOf(key);
+    if (!key) return 0;
+    const pr = this.byKey.get(key);
+    return pr ? pr.p : UNKNOWN_RANK;
   }
 
   rankOfPage(pageId) {
-    return this.rankOfKey(this.keyOfPage.get(pageId));
+    return this.keyOfPage.has(pageId) ? this.rankOfKey(this.keyOfPage.get(pageId) ?? undefined) : UNKNOWN_RANK;
   }
 
   isFar(key) {
@@ -76,7 +87,7 @@ export function readingQueues() {
     slot: (rank, run) => compute.submit("ocr", run, { rank }),
     // msg: an eng:page message. {rank, stale} for the queue jobs of this request.
     request(msg) {
-      if (msg.key) priorities.set(msg.key, msg.priority);
+      if (msg.key) priorities.set(msg.key, msg.priority, { force: true });
       return { rank: () => priorities.rankOfKey(msg.key), stale: () => priorities.isFar(msg.key) };
     },
     bind: (pageId, key) => priorities.bind(pageId, key),
