@@ -16,7 +16,7 @@ function sources(dir) {
 
 test("only panel/entries.js imports explain / FREE_URL from lib/llm.js", () => {
   const importers = sources(root)
-    .filter((f) => /lib\/llm\.js["']/.test(readFileSync(f, "utf8")))
+    .filter((f) => /\bllm\.js["']/.test(readFileSync(f, "utf8")))
     .map((f) => relative(root, f))
     .sort();
   assert.deepEqual(importers, ["panel/entries.js"]);

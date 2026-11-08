@@ -48,7 +48,7 @@ Removing the extension removes all of this local data. Your Anki cards stay.
 
 4. **Explanations: Off.** In Settings → Explanations you can choose Off. Then no bubble text is sent anywhere; reading, OCR, the dictionary and Anki cards keep working. The models, the dictionary and page images still download as described above.
 
-5. **Nothing else.** Apart from loading the page images from the manga site you are reading (to read them on your device) and talking to Anki on `127.0.0.1`, the extension makes no other requests. It has no analytics or tracking code and sets no cookies of its own. When it downloads a page image, the request goes to the image site: the request made from the page carries the page's Referer and, for images from the page's own site, its cookies; the request made by the extension's own background page is sent with the image site's cookies and the extension as the referrer.
+5. **Nothing else.** Apart from loading the page images from the manga site you are reading (to read them on your device) and talking to Anki on `127.0.0.1`, the extension makes no other requests. It has no analytics or tracking code and sets no cookies of its own. When it downloads a page image, the request goes to the image site: the request made from the page carries the page's Referer and, for images from the page's own site, its cookies; the request made by the extension's own offscreen page can carry the image site's cookies, and it does not send the address of the page you are reading.
 
 ## Permissions
 
