@@ -38,3 +38,20 @@ test("welcome page: English, shared look, no inline script", () => {
   assert.match(html, /href="\.\.\/panel\/panel\.css"/);
   assert.doesNotMatch(html, /<script(?![^>]*\bsrc=)[^>]*>/, "MV3 pages allow no inline script");
 });
+
+test("welcome page: an optional Anki block (AnkiConnect code, the panel's real button, the README's Anki section)", () => {
+  assert.match(text, /Optional: save words to Anki/);
+  assert.match(text, /work without Anki/);
+  assert.match(text, /Tools → Add-ons → Get Add-ons…/);
+  assert.match(text, /2055492159/);
+  assert.match(text, /Restart Anki and keep it open/);
+  const connect = panelHtml.match(/id="anki-connect"[^>]*>([^<]+)</)[1];
+  assert.ok(text.includes(`“${connect}”`), `mentions “${connect}”`);
+  assert.match(text, /accept the prompt in Anki/);
+  assert.match(text, /deck/);
+  const readme = readFileSync(new URL("../../README.md", import.meta.url), "utf8");
+  assert.match(readme, /^## Anki and AnkiConnect$/m, "the link's anchor exists");
+  assert.match(html, /<a href="https:\/\/apps\.ankiweb\.net\/" target="_blank" rel="noopener">Anki desktop<\/a>/, "the official download page");
+  assert.match(html, /<a href="https:\/\/github\.com\/Suraba03\/anki_manga#anki-and-ankiconnect" target="_blank" rel="noopener">/);
+  assert.ok(html.indexOf("Optional: save words to Anki") > html.indexOf('id="next-title"'), "after the While you wait steps");
+});
