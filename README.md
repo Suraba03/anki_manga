@@ -12,9 +12,12 @@ There is nothing else to install: no helper program, no Python, no Terminal. Tex
 
 ## What's new in 0.3.0
 
+- **Faster on long chapters.** The page on screen is read first: jump or scroll fast to a page and its bubbles show in about 2–3 s instead of 15+ s.
 - **Faster start.** The first download shows megabytes and time left, a welcome tab follows it, and after a browser restart the extension is ready in about a second.
 - **Works on more sites.** Images are loaded the way the page loads them, tall pages are read from screenshots, and thumbnails no longer get badges.
-- **A clear message** when an explanation isn't available for a line.
+- **Explanations can be turned off.** With Explanations set to **Off**, no bubble text is sent anywhere; furigana, the dictionary and cards keep working. **Delete saved key** removes your API key.
+- **You choose the Anki deck.** The extension never picks one for you, and the panel shows which deck "+" adds to.
+- **Clear messages** when an explanation isn't available for a line, and when the free service has used its monthly budget (with the date it comes back).
 - **A green "✓ added"** once a card is in Anki.
 
 ---
