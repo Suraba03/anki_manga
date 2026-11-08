@@ -20,13 +20,13 @@ Manga OCR & Mining for Anki is a Chrome extension that reads speech bubbles on m
 - **Page images.** Bubble detection and text recognition (OCR) run inside your browser. The extension never uploads the images. It keeps up to 300 page images in the browser for the picture on your cards.
 - **Recognized text, the dictionary and caches.** The downloaded models and dictionary are kept in the browser's cache storage. The pages, the recognized text and the explanations are kept in IndexedDB. These caches have no time limit; they are only trimmed to the 300 most recent page images. The "Delete downloaded models and caches" button in the panel removes the downloaded models and dictionary and the IndexedDB caches (pages, recognized text, explanations). It does not remove your settings, the saved API key (use "Delete saved key"), the list of enabled sites, the current selection (kept until the browser session ends), your Anki data, or anything held on the server (see the retention periods below).
 - **Settings and keys.** Your settings, the list of sites you enabled, the random install ID, and an API key if you add one are stored in `chrome.storage` on your device. The API key is sent only to the provider you selected, with each request, to authenticate it; it is never sent to the owner. You can remove it with "Delete saved key" in Settings → Explanations.
-- **Anki.** The extension talks to AnkiConnect only on `127.0.0.1` (your own computer). It adds cards, lists decks, and reads the existing notes in your decks to mark words you already know. A card holds the word, the sentence and its notes, a picture (a crop of the comic panel), and the page's URL and title as the source. Pictures you add to Anki are stored in Anki and follow your Anki sync settings: if you use AnkiWeb sync, they are uploaded there.
+- **Anki.** The extension talks to AnkiConnect only on `127.0.0.1` (your own computer). It adds cards, lists decks, and reads the existing notes of the deck selected for cards to mark words you already know. A card holds the word, the sentence and its notes, a picture (a crop of the comic panel), and the page's URL and title as the source. Pictures you add to Anki are stored in Anki and follow your Anki sync settings: if you use AnkiWeb sync, they are uploaded there.
 
 Removing the extension removes all of this local data. Your Anki cards stay.
 
 ## What is sent over the network
 
-1. **Model and dictionary download.** After installation the extension downloads the OCR models, and the first time you look up a word it downloads the JMdict dictionary, from this project's GitHub release. The size depends on your device: about 350 MB with WebGPU, about 200 MB on the CPU, plus the 11 MB dictionary. These are plain file downloads; the extension sends no data about you or your pages, and GitHub sees the request as it would for any download.
+1. **Model and dictionary download.** After installation the extension downloads the OCR models, and the first time you look up a word it downloads the JMdict dictionary, from this project's GitHub release. The size depends on your device: about 340 MB with WebGPU, about 190 MB on the CPU, plus the 11 MB dictionary. These are plain file downloads; the extension sends no data about you or your pages, and GitHub sees the request as it would for any download.
 
 2. **Explanations: free mode.** When you click a bubble, the text of that bubble (at most 300 characters) is sent to the project owner's server, which runs on Cloudflare Workers and asks DeepSeek for the explanation. Together with the text the extension sends a random install ID and the prompt version. The install ID is pseudonymous: it is generated on your device the first time you run the extension and is not linked to your name, your Google account or any other identifier, but it stays the same for as long as the extension is installed, so requests with it can be linked to each other. The server keeps:
    - a **shared cache** of explanations: the bubble text and the explanation that was generated, so the same line is not paid for twice. It is not linked to who asked. A cached entry is deleted when it has not been used for **180 days**;
@@ -46,9 +46,9 @@ Removing the extension removes all of this local data. Your Anki cards stay.
 
 3. **Explanations: your own key.** If you switch to your own API key (DeepSeek or another OpenAI-compatible provider), the bubble text is sent directly from your browser to the provider you chose, with your key. It does not pass through the owner's server. The provider's own privacy policy and terms apply.
 
-4. **Explanations: Off.** In Settings → Explanations you can choose Off. Then nothing about a bubble is sent anywhere; reading, OCR, the dictionary and Anki cards keep working.
+4. **Explanations: Off.** In Settings → Explanations you can choose Off. Then no bubble text is sent anywhere; reading, OCR, the dictionary and Anki cards keep working. The models, the dictionary and page images still download as described above.
 
-5. **Nothing else.** Apart from loading the page images from the manga site you are reading (to read them on your device) and talking to Anki on `127.0.0.1`, the extension makes no other requests. It has no analytics or tracking code and sets no cookies of its own. When it downloads a page image, the request can carry the image site's existing cookies and the referrer, as when the browser loads that page itself.
+5. **Nothing else.** Apart from loading the page images from the manga site you are reading (to read them on your device) and talking to Anki on `127.0.0.1`, the extension makes no other requests. It has no analytics or tracking code and sets no cookies of its own. When it downloads a page image, the request goes to the image site: the request made from the page carries the page's Referer and, for images from the page's own site, its cookies; the request made by the extension's own background page is sent with the image site's cookies and the extension as the referrer.
 
 ## Permissions
 
@@ -57,7 +57,7 @@ Removing the extension removes all of this local data. Your Anki cards stay.
 
 ## Your choices
 
-- Use your own key, or turn explanations off (Settings → Explanations → Off): then nothing is sent, and reading, OCR, the dictionary and Anki cards work without them.
+- Use your own key, or turn explanations off (Settings → Explanations → Off): then no bubble text is sent, and reading, OCR, the dictionary and Anki cards work without them.
 - Delete the saved API key ("Delete saved key") or the models and caches (see above) from the panel, or remove the extension: all local data goes with it.
 - To ask about or request the removal of a cached explanation before its 180 days are up, open an issue (below). Because the cache is not linked to you, please quote the text.
 
