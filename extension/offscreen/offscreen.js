@@ -5,6 +5,7 @@ import { buildModelSets, ensureFiles, clearModels } from "../engine/models.js";
 import { configureOrt } from "../engine/runtime.js";
 import { startEngine } from "../engine/startup.js";
 import { busyReply } from "../engine/busy.js";
+import { pageGate, resolveScope, retireEngine, waitPrepared } from "../engine/gate.js";
 import { openStore } from "../engine/store.js";
 import { OcrScheduler } from "../engine/scheduler.js";
 import { createTokenizer } from "../lib/tokenizer.js";
@@ -49,11 +50,17 @@ async function probeAnki() {
 const MODEL_CACHE = "anki-manga-models";
 const MIN_SIDE = 400;
 const MIN_LONG_SIDE = 600;
+// A page request waits this long for the warm-up and speed check before it is told to retry (models_loading). Its
+// badge reads "finding bubbles…" meanwhile, as before the gate; WebGPU settles in ~2-3 s, and a shorter wait would
+// hand slow WASM machines to the content script's retry timers (up to 15 s), so 10 s is the trade-off.
+const PREPARE_WAIT_MS = 10000;
 const PAGES_IN_MEMORY = 6; // decoded pages kept for on-demand OCR (about 7 MB each)
 
 let status = { state: "downloading", progress: 0 };
 let persistedProgress = -1;
 let engine = null;
+let preparing = null; // settles when the engine's background work (warm-up, speed check) is done; callers re-check the gate
+let prepared = null; // the benchmark once the engine's warm-up and speed check are done (pages wait for it)
 let store = null;
 let booting = null;
 const decoded = new Map(); // pageId -> rgba, least recently used first
@@ -104,6 +111,8 @@ function loadManifest() {
 
 function boot() {
   booting ||= (async () => {
+    engine = await retireEngine(engine); // a retry after a post-ready failure must not leak the old sessions
+    prepared = preparing = null;
     setStatus({ state: "downloading", progress: 0 });
     try {
       store ||= await openStore(indexedDB);
@@ -122,6 +131,10 @@ function boot() {
         },
       });
       engine = started.engine;
+      preparing = started.settled.then((r) => {
+        if (engine === started.engine && !r.error) prepared = r.benchmark;
+        return prepared;
+      });
     } catch (e) {
       console.error("engine start failed", e);
       setStatus({ state: "error", progress: 0, error: (e && e.error) || "engine_error" });
@@ -198,8 +211,14 @@ async function enginePage(msg) {
     boot(); // every page request after a failure tries again
     if (err !== "models_cleared") return { ok: false, error: "engine_error" };
   }
-  const busy = busyReply(status);
+  let busy = pageGate(status, prepared);
+  if (busy && status.state === "ready" && preparing) {
+    await waitPrepared(preparing, PREPARE_WAIT_MS); // a short wait saves the content script's retry delay
+    if (status.state === "error") return { ok: false, error: "engine_error" };
+    busy = pageGate(status, prepared);
+  }
   if (busy) return busy;
+  const { mode } = prepared;
 
   let img;
   try {
@@ -225,7 +244,7 @@ async function enginePage(msg) {
   }
   if (!(await store.loadImage(pageId))) await store.saveImage(pageId, bytes);
   remember(pageId, rgba);
-  if (msg.ocr === "all") scheduler.enqueuePage(pageId, rgba, page.bubbles);
+  if (resolveScope(msg.ocr, mode) === "all") scheduler.enqueuePage(pageId, rgba, page.bubbles);
   return { ok: true, page: { page_id: pageId, width: page.width, height: page.height, bubbles: page.bubbles } };
 }
 

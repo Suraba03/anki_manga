@@ -425,6 +425,13 @@ test("isRefusal: content_filter, or prose instead of JSON; never a cut, empty or
   assert.equal(isRefusal(JSON.stringify(GOOD), "stop"), false);
 });
 
+test("isRefusal: text around JSON (a preamble, a reasoning block) is a format failure, not a refusal", () => {
+  assert.equal(isRefusal('Here is the JSON:\n{"translation": "x"}', "stop"), false);
+  assert.equal(isRefusal('<think>The line is short.</think>\n{"translation": "x"}', "stop"), false);
+  assert.equal(isRefusal("I can't help with that.", "stop"), true);
+  assert.equal(isRefusal("Sorry, I can't explain this line.", "stop"), true);
+});
+
 const chatAnswer = (content, finish_reason = "stop") => ({ choices: [{ message: { content }, finish_reason }] });
 
 test("own key: a declined line is refused, with the reason in the detail, and nothing is cached", async () => {

@@ -35,13 +35,14 @@ const str = (v) => (v == null ? "" : String(v));
 
 // raw: a JSON string (LLM message content) or an already-parsed object (free-tier server result).
 // The model declined the line (its provider's rules) rather than failing: finish_reason "content_filter", or
-// non-empty prose where the JSON should be. A cut answer ("length"), an empty one and fenced or bare JSON are format
-// failures, not refusals. Shared by the own-key path and the free-tier server.
+// non-empty prose where the JSON should be. A cut answer ("length"), an empty one, fenced or bare JSON and JSON with
+// text around it ("Here is the JSON: {...}", a <think> block first) are format failures, not refusals. Shared by the own-key path and the free-tier server.
 export function isRefusal(content, finishReason) {
   if (finishReason === "content_filter") return true;
   if (finishReason === "length" || typeof content !== "string") return false;
   const text = content.trim();
-  return text !== "" && !/^[{[`]/.test(text);
+  // On purpose: content containing "{" is JSON with text around it, so a format failure (bad_response), not a refusal.
+  return text !== "" && !/^[[`]/.test(text) && !text.includes("{");
 }
 
 export function parseExplanation(raw) {

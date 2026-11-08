@@ -183,7 +183,7 @@ test("a text that was already known comes back with the prioritize reply and goe
   assert.deepEqual(toTabs, [[4, { type: "am:bubble-text", pageId: "P", bubbleId: 7, text: "known" }]]);
 });
 
-test("am:page checks image-host permission, then asks the engine to OCR everything (prefetch)", async () => {
+test("am:page checks image-host permission, then asks the engine to OCR (auto: it decides once the speed is measured)", async () => {
   reset();
   const send = await startWorker("page");
   granted = false;
@@ -202,11 +202,11 @@ test("am:page checks image-host permission, then asks the engine to OCR everythi
     target: "offscreen",
     type: "eng:page",
     source: { url: "https://cdn.example/p1.jpg" },
-    ocr: "all",
+    ocr: "auto",
   });
 });
 
-test("on-demand mode (setting or benchmark) asks for no prefetch OCR", async () => {
+test("the OCR scope follows perfMode and the measured mode, and is auto while the mode is unknown", async () => {
   reset();
   const send = await startWorker("ondemand");
   store.local.settings = { perfMode: "on-demand" };
@@ -221,6 +221,19 @@ test("on-demand mode (setting or benchmark) asks for no prefetch OCR", async () 
   store.local.settings = { perfMode: "prefetch" };
   await send({ type: "am:page", imageUrl: "https://cdn.example/p.jpg" }, tab(1));
   assert.equal(toOffscreen.at(-1).ocr, "all");
+
+  store.local.settings = { perfMode: "auto" };
+  store.session.modelStatus = { state: "ready", progress: 1, ep: "wasm", mode: "prefetch" };
+  await send({ type: "am:page", imageUrl: "https://cdn.example/p.jpg" }, tab(1));
+  assert.equal(toOffscreen.at(-1).ocr, "all");
+
+  // The mode is not known yet (first run: still warming up / measuring): the engine decides after the measurement.
+  store.session.modelStatus = { state: "ready", progress: 1, ep: "wasm" };
+  await send({ type: "am:page", imageUrl: "https://cdn.example/p.jpg" }, tab(1));
+  assert.equal(toOffscreen.at(-1).ocr, "auto");
+  delete store.session.modelStatus;
+  await send({ type: "am:page", imageUrl: "https://cdn.example/p.jpg" }, tab(1));
+  assert.equal(toOffscreen.at(-1).ocr, "auto");
 });
 
 test("am:capture sends the screenshot and the crop rectangle in device pixels", async () => {
@@ -239,7 +252,7 @@ test("am:capture sends the screenshot and the crop rectangle in device pixels", 
     target: "offscreen",
     type: "eng:page",
     source: { dataUrl: screenshot, crop: { x: 10, y: 20, width: 300, height: 400, scale: 2 } },
-    ocr: "all",
+    ocr: "auto",
   });
 });
 
