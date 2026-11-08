@@ -49,6 +49,12 @@ body {
 }
 .btn:disabled { opacity: .5; cursor: default; }
 .page-status { margin: -4px 14px 8px; font-size: 12px; color: var(--muted); }
+.deck-target {
+  display: block; margin: 0 14px 8px; padding: 0; background: none; border: 0; font: inherit; font-size: 12px;
+  color: var(--muted); text-align: left; cursor: pointer;
+}
+.deck-target:empty { display: none; }
+.deck-target.none { color: var(--warn); }
 #host-requests .btn { margin: 0 14px 8px; }
 main { padding: 0 14px 14px; }
 .empty { color: var(--muted); }
@@ -84,6 +90,7 @@ h5 { margin: 12px 0 4px; font-size: 11px; letter-spacing: .06em; text-transform:
 .settings[open] summary { font-weight: 600; color: var(--text); }
 .settings summary { cursor: pointer; color: var(--soft); padding: 4px 0; }
 .field { display: block; margin: 8px 0; }
+div.field > label { display: block; }
 .row { display: flex; gap: 6px; margin-top: 3px; }
 input, select {
   flex: 1; width: 100%; padding: 4px 6px; font: inherit; color: var(--text);

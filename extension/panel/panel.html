@@ -18,11 +18,14 @@
   <details id="settings" class="settings">
     <summary>⚙ Settings</summary>
 
-    <label class="field">Anki deck for this site
+    <div class="field">
+      <label for="deck">Anki deck for this site</label>
       <select id="deck"></select>
-      <span id="deck-state" class="hint"></span>
+      <span id="deck-state" class="hint" aria-live="polite"></span>
+      <button id="deck-use" class="btn" type="button" hidden>Use this deck</button>
+      <button id="deck-create" class="btn" type="button" hidden>Create “manga mining”</button>
       <button id="anki-connect" class="btn" type="button" hidden>Connect to Anki</button>
-    </label>
+    </div>
 
     <fieldset class="field">
       <legend>Explanations</legend>
@@ -86,6 +89,7 @@
   <p id="page-status" class="page-status" hidden></p>
   <div id="host-requests"></div>
 
+  <button id="deck-target" class="deck-target" type="button" title="Change it in Settings"></button>
   <main id="entries">
     <p id="empty" class="empty"><b>Click</b> a bubble (or press <kbd>Alt</kbd>+<kbd>E</kbd> over it) to explain it here. Click a word in the sentence for its dictionary entry.</p>
   </main>

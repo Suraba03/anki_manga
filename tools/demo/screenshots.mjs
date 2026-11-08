@@ -87,7 +87,11 @@ try {
   // the poster is this frame under the product name instead of a headline
   composite(join(TMP, "shot-1-reader.png"), join(TMP, "shot-1-panel.png"), await strip("brand", "Manga OCR &amp; Mining for Anki"), join(OUT, "demo-poster.png"));
 
-  // 2: a word of the sentence -> dictionary entry -> "+" -> "✓ added" (fake AnkiConnect on 8766, deck "manga mining")
+  // 2: a word of the sentence -> dictionary entry -> "+" -> "✓ added" (fake AnkiConnect on 8766, deck "manga mining",
+  // confirmed first in Settings: no deck is picked silently)
+  await waitFor(() => panel.evaluate('!document.getElementById("deck-use").hidden'), "the Use-deck button", 30000);
+  await panel.evaluate('document.getElementById("deck-use").click()');
+  await waitFor(async () => (await text(panel, "#deck-target")) === "Cards go to → manga mining", "the deck line", 10000);
   const [tx, ty] = await centerOf(panel, ".entry .tok", "歩");
   await clickMouse(panel, tx, ty);
   await waitFor(async () => (await panel.evaluate('document.querySelectorAll(".entry .dict-entry").length')) > 0, "the dictionary entry", 60000);

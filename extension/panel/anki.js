@@ -52,3 +52,7 @@ export const forgetKnown = (deck) => known.delete(deck);
 export async function deckNames(options) {
   return (await ankiReady(options)).deckNames();
 }
+
+export async function createDeck(name) {
+  return (await ankiReady({ userAction: true })).createDeck(name);
+}

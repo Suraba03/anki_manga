@@ -13,6 +13,14 @@ import {
   validateBaseUrl,
   freeRemainingAfterError,
   cardDoneState,
+  deckChoice,
+  resolveDeck,
+  deckForCard,
+  latestCall,
+  deckChanged,
+  deckTargetText,
+  DEFAULT_DECK,
+  NO_DECK,
 } from "../panel/logic.js";
 
 test("free-tier and no_text copy is exact", () => {
@@ -190,4 +198,96 @@ test("a declined line: neutral message, no retry, and the free counter is left a
   assert.equal(free.text, `${own.text} It did not count toward your free limit.`);
   assert.equal(explainErrorMessage("free_daily_limit", { free: true }).text, explainErrorMessage("free_daily_limit").text, "other codes ignore the mode");
   assert.equal(freeRemainingAfterError("refused"), null);
+});
+
+test("deck: a deck that Anki has is selected as it is, with nothing to offer", () => {
+  assert.deepEqual(deckChoice(["Default", "Japanese", "manga mining"], "Japanese"), { selected: "Japanese", offer: null });
+});
+
+test("deck: no deck and 'manga mining' exists: preselected, but only saved once the user confirms", () => {
+  assert.equal(DEFAULT_DECK, "manga mining");
+  assert.deepEqual(deckChoice(["Default", "manga mining"], null), { selected: "manga mining", offer: "use" });
+});
+
+test("deck: no deck and no 'manga mining': nothing is selected (never the first deck); creating it is offered", () => {
+  assert.deepEqual(deckChoice(["Default", "Japanese"], null), { selected: null, offer: "create" });
+  assert.deepEqual(deckChoice([], null), { selected: null, offer: "create" });
+});
+
+test("resolveDeck: the deck of this site wins while Anki has it", () => {
+  const decks = { "https://a.example": "Site", _last: "Last" };
+  assert.deepEqual(resolveDeck(decks, "https://a.example", ["Last", "Site"]), { deck: "Site", missing: null });
+});
+
+test("resolveDeck: a site deck Anki lacks falls back to the last deck, and is reported", () => {
+  const decks = { "https://a.example": "Site", _last: "Last" };
+  assert.deepEqual(resolveDeck(decks, "https://a.example", ["Last"]), { deck: "Last", missing: "Site" });
+});
+
+test("resolveDeck: a lacking last deck is not reported while the site deck is fine", () => {
+  const decks = { "https://a.example": "Site", _last: "Other site's deck" };
+  assert.deepEqual(resolveDeck(decks, "https://a.example", ["Site"]), { deck: "Site", missing: null });
+});
+
+test("resolveDeck: both decks missing: no deck, the site deck is reported", () => {
+  const decks = { "https://a.example": "Site", _last: "Last" };
+  assert.deepEqual(resolveDeck(decks, "https://a.example", ["Default"]), { deck: null, missing: "Site" });
+});
+
+test("resolveDeck: a site without its own deck uses the last one, or reports it when Anki lacks it", () => {
+  const decks = { _last: "Last" };
+  assert.deepEqual(resolveDeck(decks, "https://b.example", ["Last"]), { deck: "Last", missing: null });
+  assert.deepEqual(resolveDeck(decks, "https://b.example", ["Default"]), { deck: null, missing: "Last" });
+  assert.deepEqual(resolveDeck(decks, null, ["Last"]), { deck: "Last", missing: null });
+});
+
+test("resolveDeck: an empty list of names yields no deck, and the function leaves the saved decks alone", () => {
+  const decks = { "https://a.example": "Site", _last: "Site" };
+  const before = JSON.stringify(decks);
+  assert.deepEqual(resolveDeck(decks, "https://a.example", []), { deck: null, missing: "Site" });
+  assert.equal(JSON.stringify(decks), before);
+});
+
+test("resolveDeck: nothing saved: no deck, nothing reported", () => {
+  assert.deepEqual(resolveDeck({}, "https://a.example", ["Default", "manga mining"]), { deck: null, missing: null });
+  assert.deepEqual(resolveDeck(undefined, null, []), { deck: null, missing: null });
+});
+
+test("deckForCard: the last successful check decides for this site; without one, storage is read as it is", () => {
+  const decks = { "https://a.example": "Site", _last: "Last" };
+  assert.equal(deckForCard(decks, "https://a.example", { origin: "https://a.example", deck: null }), null, "checked: nothing usable");
+  assert.equal(deckForCard(decks, "https://a.example", { origin: "https://a.example", deck: "Last" }), "Last");
+  assert.equal(deckForCard(decks, "https://a.example", { origin: "https://other.example", deck: "X" }), "Site", "a check of another site does not count");
+  assert.equal(deckForCard(decks, "https://a.example", null), "Site");
+  assert.equal(deckForCard({ _last: "Last" }, "https://b.example", null), "Last");
+  assert.equal(deckForCard({}, "https://b.example", null), null);
+});
+
+test("deckChanged: announced when the deck in force differs from the last one announced", () => {
+  let announced = null; // nothing announced yet
+  const load = (deck) => {
+    const fires = deckChanged(announced, deck);
+    if (fires) announced = deck;
+    return fires;
+  };
+  assert.equal(load(null), false, "first load, no deck: nothing to refresh");
+  assert.equal(load("manga mining"), true, "the user picks, confirms or creates a deck");
+  assert.equal(load("manga mining"), false, "the same deck again");
+  assert.equal(load("Japanese"), true, "a tab change to a site with another deck");
+  assert.equal(load(null), true, "the deck is gone");
+});
+
+test("latestCall: only the newest call is current", () => {
+  const next = latestCall();
+  const first = next();
+  assert.equal(first(), true);
+  const second = next();
+  assert.equal(first(), false, "an older call no longer paints");
+  assert.equal(second(), true);
+});
+
+test("deck: the line by the cards names the target deck, or says to pick one", () => {
+  assert.equal(deckTargetText("manga mining"), "Cards go to → manga mining");
+  assert.equal(deckTargetText(null), NO_DECK);
+  assert.equal(NO_DECK, "Pick an Anki deck in Settings first.");
 });
