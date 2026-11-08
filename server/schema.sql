@@ -1,4 +1,6 @@
--- Free-tier state in D1. Apply once: npx wrangler d1 execute anki-manga --remote --file schema.sql
+-- Free-tier state in D1. Apply: npx wrangler d1 execute anki-manga --remote --file schema.sql
+-- Every statement is CREATE TABLE IF NOT EXISTS, so re-running this file on the existing database is the migration
+-- for the tables added later (spend_days, alerts). The cache.last_used column below is the one exception.
 
 -- Shared explanation cache, keyed like the extension's: sha256("1\n" + NFKC(text).trim()).
 CREATE TABLE IF NOT EXISTS cache (
@@ -37,3 +39,21 @@ CREATE TABLE IF NOT EXISTS spend (
   month TEXT PRIMARY KEY,       -- YYYY-MM
   usd   REAL NOT NULL DEFAULT 0
 );
+
+-- DeepSeek spend per UTC day, in USD (for the daily-spike alert). No personal data. Pruned after 2 days by the cron.
+-- Added with the spend alerts: re-run this file on an existing database to create it.
+CREATE TABLE IF NOT EXISTS spend_days (
+  day TEXT PRIMARY KEY,         -- YYYY-MM-DD
+  usd REAL NOT NULL DEFAULT 0
+);
+
+-- Which spend alerts were already sent, so each goes out once. Dates and the alert type only.
+-- kind: month_80 and month_100 (period YYYY-MM), day_spike (period YYYY-MM-DD). The cron deletes rows whose period is
+-- older than 13 months (YYYY-MM and YYYY-MM-DD compare correctly against a YYYY-MM cutoff). Added with the
+-- spend alerts: re-run this file on an existing database to create it.
+CREATE TABLE IF NOT EXISTS alerts (
+  period  TEXT NOT NULL,
+  kind    TEXT NOT NULL,
+  sent_at INTEGER NOT NULL,     -- ms since epoch
+  PRIMARY KEY (period, kind)
+) WITHOUT ROWID;

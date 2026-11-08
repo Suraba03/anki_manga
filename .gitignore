@@ -32,4 +32,5 @@ tools/e2e/.cache/
 # Free-tier server
 server/node_modules/
 server/.wrangler/
+server/.dev.vars
 .DS_Store

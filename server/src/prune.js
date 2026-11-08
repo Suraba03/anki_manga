@@ -16,6 +16,10 @@ export async function prune(env, now = new Date()) {
     installCounts: await run("DELETE FROM install_counts WHERE day < ?", counterCutoff),
     ipCounts: await run("DELETE FROM ip_counts WHERE day < ?", counterCutoff),
     spend: await run("DELETE FROM spend WHERE month < ?", spendCutoff),
+    spendDays: await run("DELETE FROM spend_days WHERE day < ?", counterCutoff),
+    // period is YYYY-MM or YYYY-MM-DD: by string order both are < the YYYY-MM cutoff exactly when they are older than it
+    // (a day in the cutoff month is longer than the cutoff string, so it stays one more month).
+    alerts: await run("DELETE FROM alerts WHERE period < ?", spendCutoff),
     cache: await run("DELETE FROM cache WHERE COALESCE(last_used, created_at) < ?", cacheCutoff),
   };
 }

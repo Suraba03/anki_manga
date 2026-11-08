@@ -9,6 +9,9 @@ DAILY_PER_IP = "300"
 # quota, so they have their own per-IP daily ceiling.
 DAILY_FAILED_PER_IP = "20"
 MONTHLY_CAP_USD = "10"
+# One UTC day's spend above this (USD) alerts the owner once (abuse or a bug). Optional: without it, a quarter of the
+# monthly cap. 2.5 is about 7x a normal day at the cap.
+DAILY_ALERT_USD = "2.5"
 # USD per token, DeepSeek Flash at PEAK rates (the dearer ones, so the cap errs on the safe side).
 # Source: https://api-docs.deepseek.com/quick_start/pricing (checked 2026-11-01), per 1M tokens:
 # cache hit $0.006, cache miss $0.30, output $1.20. Off-peak is half of that.
@@ -35,6 +38,15 @@ database_name = "anki-manga"
 database_id = "a25aee26-42b1-434f-800e-330a1c17b44d"
 
 # Secrets (npx wrangler secret put ...): DEEPSEEK_API_KEY, IP_SALT. Never put them in this file.
+# Spend alerts (src/alerts.js) also need two secrets, otherwise they are only logged:
+#   npx wrangler secret put TELEGRAM_BOT_TOKEN   (from @BotFather)
+#   npx wrangler secret put TELEGRAM_CHAT_ID     (your chat with the bot; send it a message first)
+# The D1 tables spend_days and alerts come from schema.sql: re-run it once on the existing database
+#   npx wrangler d1 execute anki-manga --remote --file schema.sql
+# Test the alert locally: put the two secrets as lines TELEGRAM_BOT_TOKEN=... and TELEGRAM_CHAT_ID=... in
+# server/.dev.vars (git-ignored), run `npm run dev:alerts`, then
+#   curl -X POST http://localhost:8787/dev/test-alert
+# The route exists only with DEV_ROUTES=1, which dev:alerts sets; never put it in [vars].
 
 # Daily retention cleanup (src/prune.js), 03:17 UTC.
 [triggers]

@@ -24,9 +24,12 @@ function memoryDb() {
   const cache = new Map();
   const counts = new Map();
   const spend = new Map();
+  const daySpend = new Map();
+  const alerts = new Set();
   const bump = (k) => counts.set(k, (counts.get(k) ?? 0) + 1);
+  const add = (m, k, u) => (m.set(k, (m.get(k) ?? 0) + u), m.get(k));
   return {
-    counts, cache,
+    counts, cache, spend, alerts,
     getCache: async (k) => cache.get(k) ?? null,
     putCache: async (k, _t, r) => void cache.set(k, r),
     countInstall: async (d, id) => counts.get(`i|${d}|${id}`) ?? 0,
@@ -34,7 +37,10 @@ function memoryDb() {
     countIp: async (d, h) => counts.get(`p|${d}|${h}`) ?? 0,
     incIp: async (d, h) => bump(`p|${d}|${h}`),
     getSpend: async (m) => spend.get(m) ?? 0,
-    addSpend: async (m, u) => void spend.set(m, (spend.get(m) ?? 0) + u),
+    addSpend: async (m, u) => add(spend, m, u),
+    addDaySpend: async (d, u) => add(daySpend, d, u),
+    claimAlert: async (p, k) => !alerts.has(`${p}|${k}`) && (alerts.add(`${p}|${k}`), true),
+    releaseAlert: async (p, k) => void alerts.delete(`${p}|${k}`),
   };
 }
 
@@ -348,4 +354,141 @@ test("wrangler.toml allows exactly the Web Store extension and the owner's two d
   for (const o of [STORE_ORIGIN, ...DEV_ORIGINS]) assert.equal(originAllowed(o, config), true);
   assert.equal(originAllowed("chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", config), false);
   assert.equal(originAllowed("https://example.com", config), false);
+});
+
+// ---- spend alerts in the worker ----
+const TELEGRAM_ENV = { ...ENV, TELEGRAM_BOT_TOKEN: "123:SECRET-TOKEN", TELEGRAM_CHAT_ID: "42" };
+
+test("handle passes notify and waitUntil to the request logic: a crossing sends one alert after the answer", async () => {
+  const w = mock.method(console, "warn", () => {});
+  try {
+    const d = deps();
+    d.db.spend.set("2026-11", 7.99995);
+    const sent = [];
+    const pending = [];
+    const r = await handle(req(), ENV, { ...d, notify: async (t) => void sent.push(t), waitUntil: (p) => pending.push(p) });
+    assert.equal(r.status, 200);
+    assert.equal(pending.length, 1);
+    await Promise.all(pending);
+    assert.equal(sent.length, 1);
+    assert.match(sent[0], /80% of the monthly budget used/);
+  } finally {
+    w.mock.restore();
+  }
+});
+
+test("without secrets there is no notifier: the alert is only claimed and logged", async () => {
+  const w = mock.method(console, "warn", () => {});
+  try {
+    const d = deps();
+    d.db.spend.set("2026-11", 7.99995);
+    const pending = [];
+    assert.equal((await handle(req(), ENV, { ...d, waitUntil: (p) => pending.push(p) })).status, 200);
+    await Promise.all(pending);
+    assert.equal(d.db.alerts.has("2026-11|month_80"), true);
+  } finally {
+    w.mock.restore();
+  }
+});
+
+test("with Telegram secrets the alert goes out through deps.alertFetch, and nothing secret is logged", async () => {
+  const w = mock.method(console, "warn", () => {});
+  try {
+    const d = deps();
+    d.db.spend.set("2026-11", 7.99995);
+    const calls = [];
+    const alertFetch = async (url, init) => (calls.push({ url, body: JSON.parse(init.body) }), new Response("", { status: 403 }));
+    const pending = [];
+    assert.equal((await handle(req(), TELEGRAM_ENV, { ...d, alertFetch, waitUntil: (p) => pending.push(p) })).status, 200);
+    await Promise.all(pending);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, "https://api.telegram.org/bot123:SECRET-TOKEN/sendMessage");
+    assert.equal(calls[0].body.chat_id, "42");
+    assert.equal(d.db.alerts.has("2026-11|month_80"), false, "released after the 403");
+    const logged = [...errors.mock.calls, ...w.mock.calls].map((c) => c.arguments.join(" ")).join("\n");
+    assert.match(logged, /alert failed/);
+    assert.ok(!logged.includes("SECRET-TOKEN") && !logged.includes("telegram.org"), logged);
+  } finally {
+    w.mock.restore();
+  }
+});
+
+const devReq = (over = {}) => new Request("https://w.example/dev/test-alert", { method: over.method ?? "POST", headers: over.headers ?? {} });
+const DEV = { ...ENV, DEV_ROUTES: "1" };
+const AT = new Date("2026-11-08T10:00:00Z");
+
+test("POST /dev/test-alert is a plain 404 unless DEV_ROUTES is 1", async () => {
+  let called = 0;
+  const notify = async () => void called++;
+  for (const env of [ENV, { ...ENV, DEV_ROUTES: "0" }, { ...ENV, DEV_ROUTES: "true" }]) {
+    const r = await handle(devReq({ headers: { Origin: ORIGIN } }), env, { notify, now: AT });
+    assert.equal(r.status, 404);
+  }
+  assert.equal(called, 0);
+});
+
+test("with DEV_ROUTES=1 the test alert is sent, without an Origin header (plain curl)", async () => {
+  const sent = [];
+  const r = await handle(devReq(), DEV, { notify: async (t) => void sent.push(t), now: AT });
+  assert.equal(r.status, 200);
+  assert.deepEqual(await r.json(), { ok: true });
+  assert.deepEqual(sent, ["anki-manga free tier: test alert (sent at 2026-11-08T10:00:00.000Z)."]);
+});
+
+test("the test alert is 500 no_alert_channel without a channel and 502 alert_failed when sending fails", async () => {
+  const none = await handle(devReq(), DEV, { notify: null, now: AT });
+  assert.equal(none.status, 500);
+  assert.deepEqual(await none.json(), { error: "no_alert_channel" });
+  assert.equal((await handle(devReq(), DEV, { now: AT })).status, 500, "no secrets in env");
+
+  const bad = await handle(devReq(), TELEGRAM_ENV_DEV(), { alertFetch: async () => new Response("", { status: 401 }), now: AT });
+  assert.equal(bad.status, 502);
+  assert.deepEqual(await bad.json(), { error: "alert_failed" });
+  const logged = errors.mock.calls.map((c) => c.arguments.join(" ")).join("\n");
+  assert.match(logged, /alert failed/);
+  assert.ok(!logged.includes("SECRET-TOKEN") && !logged.includes("telegram.org"), logged);
+});
+function TELEGRAM_ENV_DEV() {
+  return { ...TELEGRAM_ENV, DEV_ROUTES: "1" };
+}
+
+test("makeD1Db adders return the new total and the alert claim is an INSERT OR IGNORE", async () => {
+  const log = [];
+  const d1 = {
+    prepare: (sql) => ({
+      bind: (...args) => ({
+        first: async () => (log.push({ sql, args }), { usd: 3.5 }),
+        run: async () => (log.push({ sql, args }), { meta: { changes: /INSERT OR IGNORE/.test(sql) && args[0] === "taken" ? 0 : 1 } }),
+      }),
+    }),
+  };
+  const db = makeD1Db(d1);
+  assert.equal(await db.addSpend("2026-11", 0.5), 3.5);
+  assert.equal(await db.addDaySpend("2026-11-08", 0.5), 3.5);
+  assert.match(log[0].sql, /INSERT INTO spend[\s\S]*ON CONFLICT[\s\S]*usd = usd \+ excluded\.usd[\s\S]*RETURNING usd/);
+  assert.match(log[1].sql, /INSERT INTO spend_days[\s\S]*ON CONFLICT[\s\S]*usd = usd \+ excluded\.usd[\s\S]*RETURNING usd/);
+  assert.deepEqual(log[1].args, ["2026-11-08", 0.5]);
+  assert.equal(await db.claimAlert("2026-11", "month_80", 1700000000000), true);
+  assert.equal(await db.claimAlert("taken", "month_80", 1), false);
+  assert.match(log[2].sql, /INSERT OR IGNORE INTO alerts/);
+  assert.deepEqual(log[2].args, ["2026-11", "month_80", 1700000000000]);
+  await db.releaseAlert("2026-11", "month_80");
+  assert.match(log[4].sql, /DELETE FROM alerts WHERE period = \? AND kind = \?/);
+  assert.deepEqual(log[4].args, ["2026-11", "month_80"]);
+});
+
+test("wrangler.toml documents DAILY_ALERT_USD and never sets DEV_ROUTES or the Telegram secrets", () => {
+  const toml = readFileSync(new URL("../wrangler.toml", import.meta.url), "utf8");
+  assert.match(toml, /DAILY_ALERT_USD/);
+  assert.doesNotMatch(toml, /^\s*DEV_ROUTES\s*=/m);
+  assert.doesNotMatch(toml, /^\s*TELEGRAM_[A-Z_]+\s*=/m);
+  assert.match(toml, /TELEGRAM_BOT_TOKEN/);
+  assert.match(toml, /dev:alerts/);
+});
+
+test("server/package.json has the dev:alerts script and .gitignore keeps server/.dev.vars out", () => {
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.equal(pkg.scripts["dev:alerts"], "wrangler dev --var DEV_ROUTES:1");
+  const ignore = readFileSync(new URL("../../.gitignore", import.meta.url), "utf8");
+  assert.match(ignore, /^server\/\.dev\.vars$/m);
 });
