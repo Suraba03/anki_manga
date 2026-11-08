@@ -5,7 +5,7 @@ permalink: /privacy/
 
 # Privacy policy: Manga OCR & Mining for Anki
 
-Last updated: 2026-11-02
+Last updated: 2026-11-08
 
 Manga OCR & Mining for Anki is a Chrome extension that reads speech bubbles on manga pages in your browser and helps you make Anki cards. This page says what it does with your data. The code is open: <https://github.com/Suraba03/anki_manga>.
 
@@ -28,10 +28,13 @@ Manga OCR & Mining for Anki is a Chrome extension that reads speech bubbles on m
 
 2. **Explanations: free mode.** When you click a bubble, the text of that bubble (at most 300 characters) is sent to the project owner's server, which runs on Cloudflare Workers and asks DeepSeek for the explanation. Together with the text the extension sends a random install ID and the prompt version. The install ID is generated on your device the first time you run the extension; it is not linked to your name, your Google account or any other identifier. The server keeps:
    - a **shared cache** of explanations: the bubble text and the explanation that was generated, so the same line is not paid for twice. It is not linked to who asked. A cached entry is deleted when it has not been used for **180 days**;
-   - **counters** used for the free limits: the number of explanations per install ID per day, the number per network address per day, the number of failed paid calls (those that returned no explanation) per network address per day, and the total spend per month. The per-day counters are deleted after **2 days**, and the monthly spend totals (which contain no personal data) after **13 months**. The per-address counters do not hold the address itself but a pseudonymous hash of it, made with a secret salt that is known only to the server. They are still treated as personal data and are deleted after 2 days, like the install ID counter;
+   - **counters** used for the free limits: the number of explanations per install ID per day, the number per network address per day, the number of failed paid calls (those that returned no explanation) per network address per day, the total spend per month, and the total spend per day. The per-day counters are deleted after **2 days** (the daily spend total contains no personal data), and the monthly spend totals (which contain no personal data) after **13 months**. The per-address counters do not hold the address itself but a pseudonymous hash of it, made with a secret salt that is known only to the server. They are still treated as personal data and are deleted after 2 days, like the install ID counter;
+   - a **record of which spend alerts were sent** (the date and the alert type only, such as "80% of the monthly budget"), so each alert goes out once. It is deleted after **13 months**;
    - nothing else: no page images, no page URLs, no site names, no names or emails.
 
    The server is hosted on Cloudflare, which, like any host, sees the network address of a request while handling it. The server code does not store that address.
+
+   The server sends spend alerts to the developer (through a Telegram bot) when the monthly budget is running out or a day's spend is unusually high. They contain only amounts and dates, never text, network addresses or IDs.
 
    Cleanup runs automatically once a day.
 
