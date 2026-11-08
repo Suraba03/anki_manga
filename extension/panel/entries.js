@@ -251,7 +251,14 @@ export async function explainSelection(sel) {
 
   ctx.knownP = loadKnown(ctx);
 
-  // 2) explanation: local cache, then the free tier or the user's own provider
+  // 2) explanation: local cache, then the free tier or the user's own provider (not at all when Off)
+  const settings = await getSettings();
+  if (settings.llm.mode === "off") {
+    tr.textContent = "";
+    tr.classList.remove("skeleton");
+    addMsg(el, explainErrorMessage("explanations_off").text, null);
+    return;
+  }
   tr.textContent = "Explaining…";
   tr.classList.add("skeleton");
   let cause = "";
@@ -259,7 +266,6 @@ export async function explainSelection(sel) {
     cause = d;
     console.warn("[anki_manga] explanation failed:", d);
   };
-  const settings = await getSettings();
   const r = await explain(ctx.text, { settings, store: await store(), fetch: (...a) => fetch(...a), freeUrl: FREE_URL, onError });
   tr.classList.remove("skeleton");
   if (!r.ok) {

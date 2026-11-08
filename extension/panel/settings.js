@@ -1,6 +1,6 @@
-// The settings drawer: deck, explanation source (free / own key), text-recognition mode, delete data.
+// The settings drawer: deck, explanation source (free / own key / off), text-recognition mode, delete data.
 import { getSettings, setSettings } from "../lib/settings.js";
-import { freeLeftText, ankiErrorMessage, ownKeyCheck, llmModeAfter, validateBaseUrl, resolveDeck, deckChoice, deckForCard, deckTargetText, latestCall, deckChanged, DEFAULT_DECK } from "./logic.js";
+import { freeLeftText, ankiErrorMessage, ownKeyCheck, llmModeAfter, explanationsHint, validateBaseUrl, resolveDeck, deckChoice, deckForCard, deckTargetText, latestCall, deckChanged, DEFAULT_DECK } from "./logic.js";
 import { deckNames, createDeck, forgetKnown } from "./anki.js";
 import { engine } from "./engine.js";
 import { state } from "./state.js";
@@ -84,20 +84,36 @@ export async function loadDecks({ userAction = false } = {}) {
   }
 }
 
-// --- explanations: free or own key ----------------------------------------------------
+// --- explanations: free, own key or off ----------------------------------------------------
 // The own-key form can be open while the saved mode is still "free": the mode flips when a key is saved.
 let ownFormOpen = false;
 
 async function showLlm() {
   const { llm } = await getSettings();
   const showOwn = llm.mode === "own" || ownFormOpen;
-  document.querySelector(`input[name="llm-mode"][value="${showOwn ? "own" : "free"}"]`).checked = true;
+  const shown = showOwn ? "own" : llm.mode === "off" ? "off" : "free";
+  document.querySelector(`input[name="llm-mode"][value="${shown}"]`).checked = true;
+  $("llm-hint").textContent = explanationsHint(llm.mode); // what really happens, even while the own-key form is open
+  $("free-left").hidden = llm.mode !== "free";
+  $("delete-key").hidden = !llm.apiKey;
   $("own-key").hidden = !showOwn;
   $("provider").value = llm.provider;
   $("base-url-field").hidden = llm.provider !== "custom";
   $("base-url").value = llm.baseUrl;
   $("model").value = llm.model;
   $("api-key").placeholder = llm.apiKey ? "Key saved — paste a new one to replace it" : "sk-…";
+}
+
+// Deleting the key from "own" turns explanations off; it never moves the text to the free server by itself.
+async function deleteKey() {
+  if (!confirm("Delete the saved API key from this browser?")) return;
+  const { llm } = await getSettings();
+  const mode = llmModeAfter("delete_key", llm);
+  await setSettings({ llm: { apiKey: "", mode } });
+  ownFormOpen = true; // keep the form open so the message below is seen
+  $("api-key").value = "";
+  $("own-state").textContent = mode !== llm.mode ? "Key deleted. Explanations are off until you choose Free or save a new key." : "Key deleted.";
+  await showLlm();
 }
 
 async function showFreeLeft() {
@@ -171,7 +187,7 @@ export async function initSettings() {
     radio.addEventListener("change", async () => {
       const { llm } = await getSettings();
       ownFormOpen = radio.value === "own";
-      const mode = llmModeAfter(radio.value === "own" ? "select_own" : "select_free", llm);
+      const mode = llmModeAfter({ own: "select_own", off: "select_off" }[radio.value] || "select_free", llm);
       if (mode !== llm.mode) await setSettings({ llm: { mode } });
       showLlm();
     });
@@ -180,6 +196,7 @@ export async function initSettings() {
     $("base-url-field").hidden = $("provider").value !== "custom";
   });
   $("save-own").addEventListener("click", saveOwn);
+  $("delete-key").addEventListener("click", deleteKey);
   $("anki-connect").addEventListener("click", () => loadDecks({ userAction: true }));
 
   $("perf").value = (await getSettings()).perfMode;

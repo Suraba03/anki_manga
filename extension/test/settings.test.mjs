@@ -37,3 +37,11 @@ test("setSettings merges patches, including nested llm, and never changes instal
   assert.deepEqual(s.llm, { mode: "own", provider: "deepseek", apiKey: "k", baseUrl: "", model: "" });
   assert.equal(s.installId, installId);
 });
+
+test("deleting the saved key clears only the key (and may switch to off)", async () => {
+  stubStorage();
+  const { getSettings, setSettings } = await import("../lib/settings.js");
+  await setSettings({ llm: { mode: "own", provider: "custom", apiKey: "k", baseUrl: "http://localhost:1/v1", model: "m" } });
+  await setSettings({ llm: { apiKey: "", mode: "off" } });
+  assert.deepEqual((await getSettings()).llm, { mode: "off", provider: "custom", apiKey: "", baseUrl: "http://localhost:1/v1", model: "m" });
+});

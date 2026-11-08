@@ -10,6 +10,7 @@ import {
   ownKeyCheck,
   shouldAskPermission,
   llmModeAfter,
+  explanationsHint,
   validateBaseUrl,
   freeRemainingAfterError,
   cardDoneState,
@@ -140,6 +141,33 @@ test("the explanation mode only becomes own once a key is saved", () => {
   assert.equal(llmModeAfter("select_free", { mode: "own", apiKey: "sk-x" }), "free");
   assert.equal(llmModeAfter("save_own_refused", free), "free");
   assert.equal(llmModeAfter("save_own_refused", { mode: "own", apiKey: "sk-x" }), "own");
+});
+
+test("Off is a mode of its own; deleting the key never switches to the free server", () => {
+  assert.equal(llmModeAfter("select_off", { mode: "free", apiKey: "" }), "off");
+  assert.equal(llmModeAfter("select_off", { mode: "own", apiKey: "sk-x" }), "off");
+  assert.equal(llmModeAfter("select_free", { mode: "off", apiKey: "" }), "free");
+  assert.equal(llmModeAfter("select_own", { mode: "off", apiKey: "" }), "off"); // no key yet: stays off
+  assert.equal(llmModeAfter("select_own", { mode: "off", apiKey: "sk-x" }), "own");
+  assert.equal(llmModeAfter("save_own", { mode: "off", apiKey: "" }), "own");
+  assert.equal(llmModeAfter("delete_key", { mode: "own", apiKey: "sk-x" }), "off");
+  assert.equal(llmModeAfter("delete_key", { mode: "free", apiKey: "sk-x" }), "free");
+  assert.equal(llmModeAfter("delete_key", { mode: "off", apiKey: "sk-x" }), "off");
+});
+
+test("the hint under Explanations says where the text goes in each mode", () => {
+  assert.equal(
+    explanationsHint("free"),
+    "The text of the bubble you click, a random install ID and the prompt version go to the project's server, which asks DeepSeek. The server also sees your network address (for the daily limit). Page images are not uploaded.",
+  );
+  assert.equal(explanationsHint("own"), "The text of the bubble you click goes from your browser to your provider, with your API key. Page images are not uploaded.");
+  assert.equal(explanationsHint("off"), "Nothing is sent. Reading, the dictionary and cards work without explanations.");
+  assert.equal(explanationsHint("anything else"), explanationsHint("free"));
+});
+
+test("explanations_off has its own message and no side effects", () => {
+  assert.deepEqual(explainErrorMessage("explanations_off"), { text: "Explanations are off. Turn them on in Settings → Explanations.", action: null });
+  assert.equal(freeRemainingAfterError("explanations_off"), null);
 });
 
 test("custom base URLs: https, or http only for localhost", () => {

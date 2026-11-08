@@ -47,3 +47,12 @@ test("deck: the select is named by its label alone; the state is announced polit
   assert.match(html, /<span id="deck-state" class="hint" aria-live="polite">/);
   assert.doesNotMatch(html, /<label[^>]*>[^<]*(?:<(?!\/label)[^>]*>[^<]*)*<select id="deck"/, "the select is not nested in a label");
 });
+
+test("Explanations: Free, own key and Off radios; a hint element and a delete-key button", () => {
+  const values = [...html.matchAll(/<input type="radio" name="llm-mode" value="(\w+)">/g)].map((m) => m[1]);
+  assert.deepEqual(values, ["free", "own", "off"]);
+  assert.match(html, /<input type="radio" name="llm-mode" value="off"> Off — nothing is sent<\/label>/);
+  assert.match(html, /<button id="delete-key" class="btn" type="button" hidden>Delete saved key<\/button>/);
+  assert.match(html, /<p id="llm-hint" class="hint"><\/p>/);
+  assert.doesNotMatch(html, /Only the text of the bubble you click is sent/);
+});

@@ -38,6 +38,18 @@ const own = (extra = {}) => ({ installId: "inst-1", llm: { mode: "own", provider
 const free = () => ({ installId: "inst-1", llm: { mode: "free", provider: "deepseek", apiKey: "", baseUrl: "", model: "" } });
 const run = (text, settings, fetch, store = fakeStore(), freeUrl = FREE_URL_TEST) => explain(text, { settings, store, fetch, freeUrl });
 
+const off = () => ({ installId: "inst-1", llm: { mode: "off", provider: "deepseek", apiKey: "sk-saved", baseUrl: "", model: "" } });
+
+test("mode off: nothing is sent and the cache is not even read", async () => {
+  const fetch = async () => assert.fail("fetch must not be called when explanations are off");
+  const store = {
+    explanationKey: async () => assert.fail("the cache key must not be computed when explanations are off"),
+    getExplanation: async () => assert.fail("the cache must not be read when explanations are off"),
+    putExplanation: async () => assert.fail("the cache must not be written when explanations are off"),
+  };
+  assert.deepEqual(await explain(TEXT, { settings: off(), store, fetch, freeUrl: FREE_URL_TEST }), { ok: false, error: "explanations_off" });
+});
+
 // ---- prompt (port of test_request_shape / parse tests) ----
 
 test("request shape: fixed system prompt first, user text second", () => {
