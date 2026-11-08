@@ -28,8 +28,28 @@
   const retrying = new Set(); // img elements with a retry timer pending
   let hovered = null; // {pageId, bubbleId}
 
-  function send(msg) {
-    return chrome.runtime.sendMessage(msg).catch(() => ({ ok: false, error: "extension_reloaded" }));
+  // sendMessage throws at once (not a rejected promise) once this copy of the script is cut off from the extension.
+  async function send(msg) {
+    try {
+      return await chrome.runtime.sendMessage(msg);
+    } catch {
+      return { ok: false, error: "extension_reloaded" };
+    }
+  }
+
+  // Timing marks for the reading-speed harness (tools/perf): recorded only while the harness has set
+  // globalThis.__amTrace (this script's own world, over CDP); otherwise one property read. at: an <img> or a URL.
+  function trace(name, at, data) {
+    const log = globalThis.__amTrace;
+    if (!log) return;
+    let key;
+    try {
+      if (typeof at === "string") key = PageFinder.pageKey(at);
+      else if (at && at.tagName === "IMG") key = PageFinder.pageKey(PageFinder.realImageUrl(at));
+    } catch {
+      /* a mark without a key */
+    }
+    log.push({ t: performance.timeOrigin + performance.now(), name, key, ...data });
   }
 
   // --- progress badges + panel summary ----------------------------------------------------
@@ -42,6 +62,7 @@
       b = Status.attachBadge(el);
       badges.set(el, b);
     }
+    trace("badge", el, state);
     b.set(state);
     reportSoon();
   }
@@ -62,8 +83,108 @@
           badges.delete(el);
         } else states.push(b.state);
       }
-      send({ type: "am:status", summary: Status.summary(states) });
+      const summary = Status.summary(states);
+      trace("report", null, summary);
+      send({ type: "am:status", summary });
     }, 300);
+  }
+
+  // --- priorities: what the engine should do first ------------------------------------------------
+  // The engine works through one queue of pages. It reads from here how far each page is from the screen (d, in viewports,
+  // 0 = visible) and a rank (p: d, plus a penalty behind the scroll direction), numbered by n so a late report never
+  // overwrites a newer one. Sent with every am:page and, throttled, as scrolling goes on.
+  const FAR_VIEWPORTS = 2; // beyond this a page is not worth the engine's time now (the prefetch zone is 1.5)
+  const BEHIND_PENALTY = 0.25;
+  const PRIORITY_MS = 120;
+  const PRIORITY_REPEAT_MS = 400; // while work is pending: pages also move without a scroll event (carousels, overlays)
+  const PRIORITY_CAP = 100; // items in one report: the nearest pages
+  const HIDDEN = { d: FAR_VIEWPORTS, p: FAR_VIEWPORTS + 0.5 }; // no box (display: none, 0x0): behind everything in the zone, but never dropped
+  const scrollDir = { x: 0, y: 1 }; // +1 = down / right; vertical readers start downwards
+  const lastScroll = new WeakMap();
+  let prioritySeq = Date.now(); // the engine outlives this copy of the script: a reload must not restart below its last report
+  let priorityTimer = null;
+  let repeatTimer = null;
+  let reported = new Map(); // key -> "d/p" as last reported
+  const round3 = (x) => Math.round(x * 1000) / 1000;
+
+  // d: the gap between the element and the screen, in viewports (0 = touching or on it). p: the rank. A page on the screen
+  // ranks below 0.1, the most visible first (a page that fills the screen beats a sliver of its neighbour); a page off
+  // the screen ranks 0.1 + d, a little worse if it is behind the scroll direction.
+  function priorityOf(el) {
+    const r = el.getBoundingClientRect();
+    if (!(r.width >= 2 && r.height >= 2)) return { ...HIDDEN };
+    const w = window.innerWidth || 1;
+    const h = window.innerHeight || 1;
+    const up = r.bottom < 0;
+    const left = r.right < 0;
+    const dy = (up ? -r.bottom : r.top > h ? r.top - h : 0) / h;
+    const dx = (left ? -r.right : r.left > w ? r.left - w : 0) / w;
+    const d = Math.max(dx, dy);
+    const overlapY = Math.min(r.bottom, h) - Math.max(r.top, 0);
+    let p;
+    if (overlapY > 0 && Math.min(r.right, w) - Math.max(r.left, 0) > 0) {
+      p = 0.1 * (1 - Math.min(1, overlapY / Math.min(r.height || 1, h)));
+    } else {
+      const vertical = dy >= dx;
+      const side = (vertical ? up : left) ? -1 : 1;
+      const behind = d > 0 && side === -(vertical ? scrollDir.y : scrollDir.x);
+      p = 0.1 + d + (behind ? BEHIND_PENALTY : 0);
+    }
+    return { d: round3(d), p: round3(p) };
+  }
+
+  // One number per report (not per page): it follows the clock, and is always newer than the one before.
+  function nextN() {
+    prioritySeq = Math.max(Date.now(), prioritySeq + 1);
+    return prioritySeq;
+  }
+
+  function trackScroll(e) {
+    const t = e && e.target && e.target.nodeType === 1 ? e.target : window;
+    const x = t === window ? window.scrollX : t.scrollLeft;
+    const y = t === window ? window.scrollY : t.scrollTop;
+    const last = lastScroll.get(t);
+    if (last) {
+      if (y !== last.y) scrollDir.y = y > last.y ? 1 : -1;
+      if (x !== last.x) scrollDir.x = x > last.x ? 1 : -1;
+    }
+    lastScroll.set(t, { x, y });
+  }
+
+  // What the engine may still have queued: requests in flight, and pages whose texts are missing (in on-demand mode the
+  // texts come on hover, so a page with its bubbles is done). The nearest PRIORITY_CAP of them, nearest first, so a long
+  // chapter cannot push the page on the screen out of the report. Only these are measured.
+  function sendPriorities() {
+    const items = [];
+    for (const [img, rec] of byImg) {
+      if (!rec.key || rec.key.startsWith("capture:") || rec.failed || !img.isConnected) continue;
+      if (rec.handle) {
+        if (perfMode === "on-demand") continue;
+        const { done, total } = rec.handle.progress();
+        if (done >= total) continue;
+      }
+      items.push({ key: rec.key, ...priorityOf(img) });
+    }
+    clearTimeout(repeatTimer);
+    repeatTimer = null;
+    if (!items.length) return reported.clear();
+    items.sort((a, b) => a.p - b.p);
+    const top = items.slice(0, PRIORITY_CAP);
+    const changed = top.filter((it) => reported.get(it.key) !== `${it.d}/${it.p}`);
+    reported = new Map(top.map((it) => [it.key, `${it.d}/${it.p}`]));
+    if (changed.length) {
+      const n = nextN();
+      send({ type: "am:priorities", items: changed.map((it) => ({ ...it, n })) });
+    }
+    repeatTimer = setTimeout(sendPriorities, PRIORITY_REPEAT_MS);
+  }
+
+  function prioritiesSoon() {
+    if (priorityTimer) return;
+    priorityTimer = setTimeout(() => {
+      priorityTimer = null;
+      sendPriorities();
+    }, PRIORITY_MS);
   }
 
   // --- overlays ---------------------------------------------------------------------
@@ -87,6 +208,7 @@
     const prev = byImg.get(img);
     if (prev && prev.handle) prev.handle.destroy();
     const handle = Overlay.attach(img, page, overlayOpts);
+    trace("overlay", img, { pageId: page.page_id, bubbles: page.bubbles.length, known: page.bubbles.filter((b) => b.text).map((b) => b.id) });
     byImg.set(img, { key, handle });
     const list = (byPage.get(page.page_id) || []).filter((h) => h.img.isConnected && h.img !== img);
     list.push(handle);
@@ -122,11 +244,13 @@
     if ((u.protocol === "blob:" || u.protocol === "http:" || u.protocol === "https:") && (direct || !corsBlocked.has(u.host))) {
       // A fetch that throws (TypeError: network or CORS) is tried once more after a pause: a burst of lazy images
       // loading at once drops a few connections. Not on an HTTP error, which says nothing about the host or the network.
+      trace("fetch:start", url);
       let resp = await fetch(url).catch(() => null);
       if (!resp) {
         await new Promise((resolve) => setTimeout(resolve, FETCH_RETRY_MS));
         resp = await fetch(url).catch(() => null);
       }
+      trace("fetch:headers", url, { ok: !!resp && resp.ok });
       if (resp) fetchThrows.delete(u.host);
       else {
         // Failed twice. Two such images in a row block the host (a real CORS failure costs a console error per try).
@@ -136,6 +260,7 @@
       }
       try {
         if (resp && resp.ok) dataUrl = await toDataUrl(await resp.blob());
+        trace("fetch:data", url, { len: dataUrl && dataUrl.length });
       } catch {
         /* unreadable or too big: the next source */
       }
@@ -165,11 +290,23 @@
     }
   }
 
+  // Never rejects: a rejected promise would sit in `results` and fail every later look at the page.
   async function loadPage(img, url) {
-    const dataUrl = await pageBytes(img, url);
-    if (dataUrl) return send({ type: "am:page", imageUrl: url, dataUrl });
-    if (url.startsWith("blob:")) return { ok: false, error: "fetch_failed" }; // the worker can't open it
-    return send({ type: "am:page", imageUrl: url });
+    try {
+      // Not worth fetching: the page is beyond the zone already (the image is watched again, see forget()).
+      if (priorityOf(img).d > FAR_VIEWPORTS) return { ok: false, error: "deferred" };
+      const dataUrl = await pageBytes(img, url);
+      if (url.startsWith("blob:") && !dataUrl) return { ok: false, error: "fetch_failed" }; // the worker can't open it
+      const priority = { ...priorityOf(img), n: nextN() };
+      // The reader moved on while the bytes were loading.
+      if (priority.d > FAR_VIEWPORTS) return { ok: false, error: "deferred" };
+      trace("send", url, { len: dataUrl ? dataUrl.length : null, d: priority.d, p: priority.p });
+      const res = await send(dataUrl ? { type: "am:page", imageUrl: url, dataUrl, priority } : { type: "am:page", imageUrl: url, priority });
+      trace("reply", url, { ok: !!(res && res.ok), error: res && res.error });
+      return res;
+    } catch {
+      return { ok: false, error: "extension_reloaded" };
+    }
   }
 
   async function processImage(img, attempt = 0) {
@@ -179,6 +316,7 @@
     const current = byImg.get(img);
     if (current && current.key === key && attempt === 0) return;
     byImg.set(img, { key, handle: null });
+    prioritiesSoon();
     // No badge until the image is laid out: a lazy placeholder may turn out to be an icon.
     if ((!results.has(key) || attempt > 0) && isShown(img)) setState(img, { phase: "detecting" });
 
@@ -188,10 +326,12 @@
       results.set(key, pending);
     }
     const res = await pending;
-    if (!(res && res.ok)) results.delete(key);
+    if (!(res && res.ok) && results.get(key) === pending) results.delete(key); // not a newer request for the same page
+    if (res && res.error === "deferred") return forget(img, key);
     if (res && res.ok) {
       waitingPermission.delete(img);
       engineFailures.delete(img);
+      deferrals.delete(img);
       await whenLaidOut(img); // the engine read the real bytes: it does not matter which pixels the <img> shows now
       if (byImg.get(img) && byImg.get(img).key === key) showPage(img, key, res.page);
       return;
@@ -228,6 +368,25 @@
       byImg.set(img, { key, handle: null, failed: error });
       if (UNREADABLE.has(error)) queueCapture(img);
     }
+  }
+
+  // The engine (or this script) set the request aside because the page left the zone: no badge, no error. The image is
+  // observed again after a pause that grows with every deferral in a row (an observer reports a page in the zone at once,
+  // so without the pause a page that keeps being turned down would loop at full speed), and then starts the next time it
+  // is near the screen.
+  const DEFER_PAUSE_MS = [250, 1200, 3500];
+  const deferrals = new Map(); // img -> deferrals since its last success
+  function forget(img, key) {
+    const cur = byImg.get(img);
+    if (!cur || cur.key !== key) return;
+    byImg.delete(img);
+    setState(img, null);
+    io.unobserve(img);
+    const count = deferrals.get(img) || 0;
+    deferrals.set(img, count + 1);
+    setTimeout(() => {
+      if (img.isConnected && imgs.has(img)) io.observe(img);
+    }, DEFER_PAUSE_MS[Math.min(count, DEFER_PAUSE_MS.length - 1)]);
   }
 
   function retryLater(img, attempt, delay) {
@@ -317,7 +476,10 @@
     return new IntersectionObserver(
       (entries) => {
         for (const e of entries) {
-          if (e.isIntersecting && startsHere(e, mode) && candidate(e.target)) processImage(e.target);
+          if (e.isIntersecting && startsHere(e, mode) && candidate(e.target)) {
+            trace("observed", e.target);
+            processImage(e.target);
+          }
         }
       },
       IO_OPTIONS[mode],
@@ -586,6 +748,15 @@
       for (const b of badges.values()) b.update();
     });
   }
+  window.addEventListener(
+    "scroll",
+    (e) => {
+      trackScroll(e);
+      prioritiesSoon();
+    },
+    { passive: true, capture: true },
+  );
+  window.addEventListener("resize", prioritiesSoon, { passive: true });
   window.addEventListener("resize", updateAll, { passive: true });
   window.addEventListener("scroll", updateAll, { passive: true, capture: true });
   new ResizeObserver(updateAll).observe(document.documentElement);
@@ -609,6 +780,7 @@
 
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.type === "am:bubble-text") {
+      trace("text", null, { pageId: msg.pageId, bubbleId: msg.bubbleId });
       for (const h of byPage.get(msg.pageId) || []) {
         h.setText(msg.bubbleId, msg.text);
         showProgress(h);

@@ -196,12 +196,15 @@ test("am:page checks image-host permission, then asks the engine to OCR (auto: i
 
   granted = true;
   engineReply = () => ({ ok: true, page: { page_id: "P", width: 1, height: 1, bubbles: [] } });
-  const ok = await send({ type: "am:page", imageUrl: "https://cdn.example/p1.jpg" }, tab(1));
+  const priority = { d: 0, p: 0, n: 1 };
+  const ok = await send({ type: "am:page", imageUrl: "https://cdn.example/p1.jpg", priority }, tab(1));
   assert.equal(ok.ok, true);
   assert.deepEqual(toOffscreen.at(-1), {
     target: "offscreen",
     type: "eng:page",
     source: { url: "https://cdn.example/p1.jpg" },
+    key: "https://cdn.example/p1.jpg", // the page key and its priority travel with the request
+    priority,
     ocr: "auto",
   });
 });

@@ -7,6 +7,8 @@ const vm = require("node:vm");
 
 const PageFinder = require("../content/page-finder.js");
 const source = fs.readFileSync(path.join(__dirname, "../content/main.js"), "utf8");
+// every am:page also carries how far its image is from the screen (here: on it), numbered from 1
+const PRIO = { d: 0, p: 0, n: 1 };
 const plain = (x) => JSON.parse(JSON.stringify(x)); // objects made inside the vm context have another prototype
 const tick = () => new Promise((r) => setImmediate(r));
 const flush = async () => {
@@ -38,7 +40,7 @@ function makeCanvas(rect = { left: 0, top: 0, width: 1000, height: 5000 }) {
 
 // replies: message type -> (msg) => reply. Returns the sandbox handles the tests need.
 // fetch: url -> truthy (a response) or throws; canvas: "ok" | "tainted" (what a canvas copy of an <img> gives).
-async function load({ imgs = [makeImg()], canvases = [], replies: given = {}, fetch: fetchImpl = () => { throw new TypeError("Failed to fetch"); }, canvas = "tainted", blobSize = 1000 } = {}) {
+async function load({ imgs = [makeImg()], canvases = [], replies: given = {}, fetch: fetchImpl = () => { throw new TypeError("Failed to fetch"); }, canvas = "tainted", blobSize = 1000, trace = false, now = 0, syncThrow = null } = {}) {
   const replies = { "am:page": () => ({ ok: true, page: page([null]) }), ...given };
   const sent = [];
   const timers = [];
@@ -99,6 +101,9 @@ async function load({ imgs = [makeImg()], canvases = [], replies: given = {}, fe
     AnkiManga: { PageFinder, Overlay, Status },
     URL,
     Promise,
+    performance, // only read while the harness trace is on
+    Date: { now: () => now }, // the numbering of priority reports starts here
+    ...(trace ? { __amTrace: [] } : {}),
     fetch: async (url) => {
       fetched.push(url);
       const resp = fetchImpl(url);
@@ -144,10 +149,13 @@ async function load({ imgs = [makeImg()], canvases = [], replies: given = {}, fe
     // No chrome.storage on purpose: a content script must not read the settings (they hold the API key).
     chrome: {
       runtime: {
-        sendMessage: async (msg) => {
-          sent.push(msg);
-          const reply = replies[msg.type];
-          return reply ? reply(msg) : { ok: true };
+        sendMessage: (msg) => {
+          if (syncThrow && syncThrow(msg)) throw new Error("Extension context invalidated.");
+          return (async () => {
+            sent.push(msg);
+            const reply = replies[msg.type];
+            return reply ? reply(msg) : { ok: true };
+          })();
         },
         onMessage: { addListener: (fn) => listeners.push(fn) },
       },
@@ -157,6 +165,8 @@ async function load({ imgs = [makeImg()], canvases = [], replies: given = {}, fe
   vm.runInContext(source, vm.createContext(sandbox));
   await flush();
   const env = {
+    window: sandbox.window,
+    log: sandbox.__amTrace,
     sent,
     handles,
     badges,
@@ -328,7 +338,7 @@ test("a same-origin image is fetched by the content script and its bytes go to t
   const env = await load({ imgs: [makeImg(SAME)], fetch: () => true });
   await env.intersect(env.imgs[0], {});
   assert.deepEqual(env.fetched, [SAME]);
-  assert.deepEqual(plain(env.ofType("am:page")), [{ type: "am:page", imageUrl: SAME, dataUrl: fake(SAME) }]);
+  assert.deepEqual(plain(env.ofType("am:page")), [{ type: "am:page", imageUrl: SAME, dataUrl: fake(SAME), priority: PRIO }]);
   assert.equal(env.handles.length, 1);
 });
 
@@ -343,7 +353,7 @@ test("when the fetch fails, the image the page already shows is copied through a
 test("when fetch and canvas both fail, the worker is asked with the URL only", async () => {
   const env = await load({ imgs: [makeImg(SAME)], fetch: () => false, canvas: "tainted" });
   await env.intersect(env.imgs[0], {});
-  assert.deepEqual(plain(env.ofType("am:page")), [{ type: "am:page", imageUrl: SAME }]);
+  assert.deepEqual(plain(env.ofType("am:page")), [{ type: "am:page", imageUrl: SAME, priority: PRIO }]);
 });
 
 test("the canvas copy is only made of the image the <img> shows: a placeholder under data-src is not copied", async () => {
@@ -352,7 +362,7 @@ test("the canvas copy is only made of the image the <img> shows: a placeholder u
   const env = await load({ imgs: [img], fetch: () => { throw new TypeError("network"); }, canvas: "ok" });
   await env.intersect(img, {});
   assert.equal(env.drawn.length, 0);
-  assert.deepEqual(plain(env.ofType("am:page")), [{ type: "am:page", imageUrl: real }]);
+  assert.deepEqual(plain(env.ofType("am:page")), [{ type: "am:page", imageUrl: real, priority: PRIO }]);
 });
 
 test("the canvas copy is made when currentSrc is the URL (hash ignored)", async () => {
@@ -391,7 +401,7 @@ test("an image that is not displayed yet is not copied through a canvas", async 
   const env = await load({ imgs: [lazy], fetch: () => false, canvas: "ok" });
   await env.intersect(lazy, {});
   assert.equal(env.drawn.length, 0);
-  assert.deepEqual(plain(env.ofType("am:page")), [{ type: "am:page", imageUrl: SAME }]);
+  assert.deepEqual(plain(env.ofType("am:page")), [{ type: "am:page", imageUrl: SAME, priority: PRIO }]);
 });
 
 test("a blob: image is never sent to the worker as a URL; when its bytes can't be read, it is screenshotted", async () => {
@@ -434,7 +444,7 @@ test("a fetch that throws twice falls back as before (canvas, then the URL)", as
   assert.equal(env.ofType("am:page")[0].dataUrl, fake("canvas"));
   const bare = await load({ imgs: [makeImg(SAME)], fetch: dead });
   await bare.intersect(bare.imgs[0], {});
-  assert.deepEqual(plain(bare.ofType("am:page")), [{ type: "am:page", imageUrl: SAME }]);
+  assert.deepEqual(plain(bare.ofType("am:page")), [{ type: "am:page", imageUrl: SAME, priority: PRIO }]);
 });
 
 test("a failure is a fetch that threw on both tries; a success in between resets the count", async () => {
@@ -468,7 +478,7 @@ test("an HTTP error from a CDN host does not stop the content script from fetchi
 test("an image whose data URL would be over 48 MB is left to the worker's own fetch", async () => {
   const env = await load({ imgs: [makeImg(SAME)], fetch: () => true, blobSize: 40 * 1024 * 1024 }); // 53 MB as base64
   await env.intersect(env.imgs[0], {});
-  assert.deepEqual(plain(env.ofType("am:page")), [{ type: "am:page", imageUrl: SAME }]);
+  assert.deepEqual(plain(env.ofType("am:page")), [{ type: "am:page", imageUrl: SAME, priority: PRIO }]);
   const small = await load({ imgs: [makeImg(SAME)], fetch: () => true, blobSize: 30 * 1024 * 1024 }); // 40 MB
   await small.intersect(small.imgs[0], {});
   assert.ok(small.ofType("am:page")[0].dataUrl);
@@ -803,4 +813,336 @@ test("a small placeholder followed by a small real image: no badge, no host requ
   assert.equal(env.badges.get(img)?.state ?? null, null);
   assert.equal(env.ofType("am:missing-host").length, 0);
   assert.equal(env.probes().length + env.captures().length, 0);
+});
+
+// --- reading-speed trace (tools/perf): marks only while the harness has set globalThis.__amTrace ---------------------
+const IMG_URL = "https://cdn.example/p1.jpg";
+const names = (log, key) => log.filter((m) => !key || m.key === key).map((m) => m.name);
+
+test("trace: a page's marks run observed -> fetch -> send -> reply -> overlay -> badge, keyed by the image URL", async () => {
+  const env = await load({ trace: true, fetch: () => true, replies: { "am:page": () => ({ ok: true, page: page([null, null]) }) } });
+  await env.intersect(env.imgs[0], {});
+  const seq = names(env.log, IMG_URL);
+  for (const [a, b] of [["observed", "fetch:start"], ["fetch:start", "fetch:headers"], ["fetch:headers", "fetch:data"], ["fetch:data", "send"], ["send", "reply"], ["reply", "overlay"]]) {
+    assert.ok(seq.indexOf(a) >= 0 && seq.indexOf(b) > seq.indexOf(a), `${a} before ${b}: ${seq}`);
+  }
+  const send = env.log.find((m) => m.name === "send");
+  assert.equal(send.len, "data:image/png;fake,".length + IMG_URL.length, "the data URL length identifies the page in the offscreen log");
+  assert.equal(env.log.find((m) => m.name === "reply").ok, true);
+  const overlay = env.log.find((m) => m.name === "overlay");
+  assert.deepEqual(plain({ pageId: overlay.pageId, bubbles: overlay.bubbles, known: overlay.known }), { pageId: "P", bubbles: 2, known: [] });
+  assert.ok(env.log.every((m) => typeof m.t === "number"));
+});
+
+test("trace: badge states, bubble texts and the panel report are marked", async () => {
+  const env = await load({ trace: true, replies: { "am:page": () => ({ ok: true, page: page([null, null]) }) } });
+  await env.intersect(env.imgs[0], {});
+  await env.message({ type: "am:bubble-text", pageId: "P", bubbleId: 0, text: "あ" });
+  await env.message({ type: "am:bubble-text", pageId: "P", bubbleId: 1, text: "い" });
+  const badges = env.log.filter((m) => m.name === "badge" && m.key === IMG_URL).map((m) => [m.phase, m.done, m.total]);
+  assert.deepEqual(badges.slice(0, 2), [["detecting", undefined, undefined], ["ocr", 0, 2]]);
+  assert.deepEqual(badges.at(-1), ["ocr", 2, 2]);
+  assert.deepEqual(env.log.filter((m) => m.name === "text").map((m) => [m.pageId, m.bubbleId]), [["P", 0], ["P", 1]]);
+  await env.fire(300);
+  assert.equal(env.log.filter((m) => m.name === "report").length, 1);
+});
+
+test("trace: a failed reply is marked with ok: false and the error", async () => {
+  const env = await load({ trace: true, fetch: () => true, replies: { "am:page": () => ({ ok: false, error: "no_image_permission", host: "cdn.example" }) } });
+  await env.intersect(env.imgs[0], {});
+  const reply = env.log.find((m) => m.name === "reply");
+  assert.equal(reply.ok, false);
+  assert.equal(reply.error, "no_image_permission");
+});
+
+test("trace: without the harness flag nothing is recorded and no global appears", async () => {
+  const env = await load({ replies: { "am:page": () => ({ ok: true, page: page([null]) }) } });
+  await env.intersect(env.imgs[0], {});
+  await env.message({ type: "am:bubble-text", pageId: "P", bubbleId: 0, text: "あ" });
+  assert.equal(env.log, undefined);
+  assert.equal(env.ofType("am:page").length, 1);
+});
+
+// --- visible page first: priorities for the engine, pages that left the zone ---------------------------------------------
+const at = (top, height = 1200) => ({ getBoundingClientRect: () => ({ left: 0, top, width: 800, height, right: 800, bottom: top + height }) });
+// innerHeight is 2000 in the sandbox: one viewport = 2000 px
+
+test("priority: an am:page request carries how far its image is from the screen (0 = visible)", async () => {
+  const env = await load({ imgs: [makeImg("https://cdn.example/p1.jpg", at(100)), makeImg("https://cdn.example/p2.jpg", at(3200))], fetch: () => true });
+  await env.intersect(env.imgs[0], {});
+  await env.intersect(env.imgs[1], {});
+  const [a, b] = env.ofType("am:page").map((m) => plain(m.priority));
+  assert.deepEqual([a.d, a.p], [0, 0]);
+  assert.equal(b.d, 0.6); // 1200 px below the screen: 0.6 viewport
+  assert.equal(b.p, 0.7); // off the screen: 0.1 + d, ahead of the (default) downward scroll: no penalty
+  assert.ok(b.n > a.n, "reports are numbered");
+});
+
+test("priority: a page behind the scroll direction ranks a little worse than one at the same distance ahead", async () => {
+  const env = await load({ imgs: [makeImg("https://cdn.example/p1.jpg", at(-3400)), makeImg("https://cdn.example/p2.jpg", at(4200))], fetch: () => true });
+  await env.intersect(env.imgs[0], {});
+  await env.intersect(env.imgs[1], {});
+  const [above, below] = env.ofType("am:page").map((m) => plain(m.priority));
+  assert.equal(above.d, below.d);
+  assert.ok(above.p > below.p, "scrolling down: the page above is behind");
+  env.window.scrollY = 500; // scrolled down...
+  await env.scroll();
+  env.window.scrollY = 100; // ...and now up
+  await env.scroll();
+  await env.fire(120);
+  const items = plain(env.ofType("am:priorities").at(-1).items);
+  const [aboveNow, belowNow] = [items.find((i) => i.key.endsWith("p1.jpg")), items.find((i) => i.key.endsWith("p2.jpg"))];
+  assert.ok(aboveNow.p < belowNow.p, "scrolling up: the page above is ahead");
+});
+
+test("priority: a page already beyond 2 viewports when its bytes are ready is not sent (deferred), and is watched again", async () => {
+  const img = makeImg("https://cdn.example/p1.jpg", at(6500)); // 4500 px = 2.25 viewports below the screen
+  const env = await load({ imgs: [img], fetch: () => true });
+  const seen = env.observeLog.length;
+  await env.intersect(img, {});
+  assert.equal(env.ofType("am:page").length, 0);
+  assert.equal(env.observeLog.length, seen, "not at once (see the backoff test)");
+  await env.fire(250);
+  assert.equal(env.observeLog.length, seen + 1, "the image is observed again");
+  assert.equal(env.badges.get(img)?.state ?? null, null, "no badge, no error");
+  // back near the screen: processed
+  img.getBoundingClientRect = at(2500).getBoundingClientRect;
+  await env.intersect(img, {});
+  assert.equal(env.ofType("am:page").length, 1);
+});
+
+test("deferred: the engine dropped the request -> no badge, no error, forgotten, observed again, and sent again next time", async () => {
+  let reply = { ok: false, error: "deferred" };
+  const env = await load({ fetch: () => true, replies: { "am:page": () => reply } });
+  const [img] = env.imgs;
+  const seen = env.observeLog.length;
+  await env.intersect(img, {});
+  assert.equal(env.ofType("am:page").length, 1);
+  await env.fire(250);
+  assert.equal(env.observeLog.length, seen + 1);
+  assert.ok(!env.badges.get(img) || env.badges.get(img).state === null, "the 'finding bubbles' badge is gone");
+  assert.equal(env.ofType("am:missing-host").length, 0);
+  assert.equal(env.captures().length + env.probes().length, 0, "not treated as an unreadable image");
+  reply = { ok: true, page: page([null]) };
+  await env.intersect(img, {});
+  assert.equal(env.ofType("am:page").length, 2, "a deferred request is not cached in results");
+  assert.equal(env.handles.length, 1);
+});
+
+test("deferred never counts as failed in the summary", async () => {
+  const env = await load({ fetch: () => true, replies: { "am:page": () => ({ ok: false, error: "deferred" }) } });
+  await env.intersect(env.imgs[0], {});
+  await env.fire(300);
+  const states = [...env.badges.values()].map((b) => b.state).filter(Boolean);
+  assert.deepEqual(states, []);
+});
+
+test("priorities: pending requests and unfinished pages are reported on scroll, throttled; finished pages are not", async () => {
+  const done = makeImg("https://cdn.example/p1.jpg", at(100));
+  const open = makeImg("https://cdn.example/p2.jpg", at(1400));
+  const env = await load({
+    imgs: [done, open],
+    fetch: () => true,
+    replies: { "am:page": (m) => ({ ok: true, page: m.imageUrl.endsWith("p1.jpg") ? { ...page([null]), page_id: "A" } : { ...page([null, null]), page_id: "B" } }) },
+  });
+  await env.intersect(done, {});
+  await env.intersect(open, {});
+  await env.message({ type: "am:bubble-text", pageId: "A", bubbleId: 0, text: "あ" }); // page A is finished
+  await env.scroll();
+  await env.scroll();
+  assert.equal(env.pendingTimers(120).length, 1, "one timer however many scroll events");
+  await env.fire(120);
+  const msgs = env.ofType("am:priorities");
+  assert.equal(msgs.length, 1);
+  assert.deepEqual(plain(msgs[0].items).map((i) => i.key), ["https://cdn.example/p2.jpg"]);
+  assert.ok(Number.isFinite(msgs[0].items[0].d) && Number.isFinite(msgs[0].items[0].p) && Number.isFinite(msgs[0].items[0].n));
+});
+
+test("priorities: nothing is sent when there is nothing to report", async () => {
+  const env = await load({ imgs: [] });
+  await env.scroll();
+  await env.fire(120);
+  assert.equal(env.ofType("am:priorities").length, 0);
+});
+
+test("priority: on the screen the most visible page ranks first (below 0.1), off the screen 0.1 + distance", async () => {
+  // viewport 2000 px high
+  const env = await load({
+    imgs: [makeImg("https://cdn.example/a.jpg", at(0, 1900)), makeImg("https://cdn.example/b.jpg", at(1940, 1900)), makeImg("https://cdn.example/c.jpg", at(3900, 1900))],
+    fetch: () => true,
+  });
+  for (const img of env.imgs) await env.intersect(img, {});
+  const [a, b, c] = env.ofType("am:page").map((m) => plain(m.priority));
+  assert.equal(a.p, 0); // all of it is on the screen
+  assert.ok(b.p > a.p && b.p < 0.1, "a sliver of the next page: on the screen, but behind the full page");
+  assert.deepEqual([a.d, b.d, c.d], [0, 0, 0.95]);
+  assert.equal(c.p, 1.05);
+});
+
+test("priority: reports are numbered so that a reloaded page's first report is newer than any report of the copy before it", async () => {
+  const before = await load({ now: 1000, fetch: () => true });
+  await before.intersect(before.imgs[0], {});
+  const after = await load({ now: 2000, fetch: () => true });
+  await after.intersect(after.imgs[0], {});
+  assert.ok(after.ofType("am:page")[0].priority.n > before.ofType("am:page")[0].priority.n);
+});
+
+// --- review fixes ---------------------------------------------------------------------------------------------------
+test("priority: one n per report, however many items; the next report is newer, and n never falls behind the clock", async () => {
+  const imgs = [1, 2, 3].map((i) => makeImg(`https://cdn.example/p${i}.jpg`, at(100 * i)));
+  const env = await load({ imgs, fetch: () => true, now: 5000, replies: { "am:page": () => new Promise(() => {}) } }); // requests stay pending
+  for (const img of imgs) await env.intersect(img, {});
+  const sentN = env.ofType("am:page").map((m) => m.priority.n);
+  assert.deepEqual(sentN, [5001, 5002, 5003], "the clock stands still: +1 per report");
+  await env.scroll();
+  await env.fire(120);
+  const batch = env.ofType("am:priorities").at(-1).items;
+  assert.equal(new Set(batch.map((i) => i.n)).size, 1, "one n for the whole batch");
+  assert.equal(batch[0].n, 5004, "a batch of three used one number, not three");
+});
+
+test("priority: n follows the clock when it moves ahead of the counter", async () => {
+  const env = await load({ now: 1000, fetch: () => true });
+  await env.intersect(env.imgs[0], {});
+  assert.equal(env.ofType("am:page")[0].priority.n, 1001);
+});
+
+test("priority: a zero-size or hidden image ranks far (behind everything in the zone), but is not 'far' enough to be deferred", async () => {
+  const hidden = makeImg("https://cdn.example/h.jpg", { getBoundingClientRect: () => ({ left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0 }) });
+  const sliver = makeImg("https://cdn.example/s.jpg", at(100, 1));
+  const shown = makeImg("https://cdn.example/v.jpg", at(100));
+  const edge = makeImg("https://cdn.example/e.jpg", at(5800)); // 1.9 viewports below
+  const env = await load({ imgs: [hidden, sliver, shown, edge], fetch: () => true });
+  for (const img of env.imgs) await env.intersect(img, {});
+  const by = Object.fromEntries(env.ofType("am:page").map((m) => [m.imageUrl.slice(-5, -4), plain(m.priority)]));
+  assert.equal(by.h.d <= 2, true, "still sent");
+  assert.ok(by.h.p > by.e.p && by.s.p > by.e.p, "behind a page 1.9 viewports away");
+  assert.ok(by.h.p > by.v.p);
+});
+
+test("deferred: the image is observed again after a pause that grows with every deferral, so a page cannot loop at full speed", async () => {
+  const env = await load({ fetch: () => true, replies: { "am:page": () => ({ ok: false, error: "deferred" }) } });
+  const [img] = env.imgs;
+  const seen = env.observeLog.length;
+  await env.intersect(img, {});
+  assert.equal(env.observeLog.length, seen, "no immediate re-observe");
+  assert.equal(env.pendingTimers(250).length, 1);
+  await env.fire(250);
+  await env.intersect(img, {}); // fires at once, still deferred
+  assert.equal(env.pendingTimers(250).length, 0);
+  assert.equal(env.pendingTimers(1200).length, 1, "longer the second time");
+  await env.fire(1200);
+  await env.intersect(img, {});
+  assert.equal(env.pendingTimers(3500).length, 1);
+  assert.equal(env.ofType("am:page").length, 3);
+});
+
+test("deferred: a page beyond the zone is turned down before its bytes are fetched", async () => {
+  const img = makeImg("https://cdn.example/p1.jpg", at(9000));
+  const env = await load({ imgs: [img], fetch: () => true });
+  await env.intersect(img, {});
+  assert.deepEqual(env.fetched, [], "no fetch, no data URL");
+});
+
+test("priorities: only requests in flight and unfinished pages are reported, nearest first, at most 100", async () => {
+  // all below the screen (2000 px high), each 20 px farther than the one before
+  const imgs = Array.from({ length: 130 }, (_, i) => makeImg(`https://cdn.example/p${String(i).padStart(3, "0")}.jpg`, at(2100 + i * 20, 1000)));
+  const env = await load({ imgs, fetch: () => true, replies: { "am:page": () => new Promise(() => {}) } });
+  for (const img of [...imgs].reverse()) await env.intersect(img, {}); // arrival order is not distance order
+  await env.scroll();
+  await env.fire(120);
+  const items = plain(env.ofType("am:priorities").at(-1).items);
+  assert.equal(items.length, 100);
+  assert.deepEqual(items.map((i) => i.key), imgs.slice(0, 100).map((i) => i.src), "the 100 nearest, nearest first");
+});
+
+test("priorities: rects are measured only for pending pages, not for the finished ones of a long chapter", async () => {
+  let measured = 0;
+  const imgs = Array.from({ length: 300 }, (_, i) => makeImg(`https://cdn.example/q${i}.jpg`, { getBoundingClientRect: () => (measured++, { left: 0, top: 2100 + i * 10, width: 800, height: 1000, right: 800, bottom: 3100 + i * 10 }) }));
+  const finished = new Set(imgs.slice(150).map((i) => i.src)); // 150 pages that are completely done
+  const env = await load({
+    imgs,
+    fetch: () => true,
+    replies: { "am:page": (m) => (finished.has(m.imageUrl) ? { ok: true, page: { ...page([null]), page_id: m.imageUrl } } : new Promise(() => {})) },
+  });
+  for (const img of imgs) await env.intersect(img, {});
+  for (const url of finished) await env.message({ type: "am:bubble-text", pageId: url, bubbleId: 0, text: "あ" });
+  measured = 0;
+  await env.scroll();
+  await env.fire(120);
+  assert.equal(measured, 150);
+  assert.equal(env.ofType("am:priorities").at(-1).items.length, 100);
+});
+
+test("priorities: in on-demand mode a page whose engine work is done (bubbles known, texts only on hover) is not reported", async () => {
+  const a = makeImg("https://cdn.example/a.jpg", at(100));
+  const b = makeImg("https://cdn.example/b.jpg", at(1400));
+  const env = await load({
+    imgs: [a, b],
+    fetch: () => true,
+    replies: { "am:perf-mode": () => ({ ok: true, mode: "on-demand" }), "am:page": (m) => (m.imageUrl.endsWith("a.jpg") ? { ok: true, page: { ...page([null, null]), page_id: "A" } } : new Promise(() => {})) },
+  });
+  await env.intersect(a, { intersectionRatio: 1 });
+  await env.intersect(b, { intersectionRatio: 1 });
+  await env.scroll();
+  await env.fire(120);
+  assert.deepEqual(plain(env.ofType("am:priorities").at(-1).items).map((i) => i.key), ["https://cdn.example/b.jpg"]);
+});
+
+test("a throw from sendMessage itself (the extension was reloaded) is an extension_reloaded reply, not a cached rejected promise", async () => {
+  let broken = true;
+  const [a, b] = [makeImg("https://cdn.example/same.jpg", at(100)), makeImg("https://cdn.example/same.jpg", at(150))];
+  const env = await load({ imgs: [a, b], fetch: () => true, syncThrow: (m) => broken && m.type === "am:page" });
+  await env.intersect(a, {});
+  assert.equal(env.badges.get(a)?.state?.error, "extension_reloaded");
+  broken = false;
+  await env.intersect(b, {}); // the same page: must ask again, not reuse the failure
+  assert.equal(env.ofType("am:page").length, 1);
+  assert.equal(env.handles.length, 1);
+});
+
+test("a late failed reply does not remove a newer cached request of the same page", async () => {
+  const URL_ = "https://cdn.example/same.jpg";
+  const [b, a, c] = [makeImg(URL_, at(100)), makeImg(URL_, at(120)), makeImg(URL_, at(140))];
+  let calls = 0;
+  let releaseA;
+  const env = await load({
+    imgs: [b, a, c],
+    fetch: () => true,
+    replies: { "am:page": () => (++calls === 1 ? { ok: false, error: "models_downloading" } : calls === 2 ? new Promise((r) => (releaseA = r)) : new Promise(() => {})) },
+  });
+  await env.intersect(b, {}); // fails, retried in 2 s
+  await env.intersect(a, {}); // a new request, slow
+  await env.fire(2000); // b retries: its request replaces a's in the cache
+  releaseA({ ok: false, error: "no_manga" }); // a's late failure
+  await env.message({ type: "noop" }); // let it land
+  await env.intersect(c, {}); // must reuse b's request
+  assert.equal(env.ofType("am:page").length, 3);
+});
+
+// A carousel or a loading overlay moves pages without a scroll event; what the engine was told must follow.
+test("priorities: while requests are pending the report is repeated without any scroll, and only for pages whose rank changed", async () => {
+  const rects = { a: at(100), b: at(2100, 1000) };
+  const a = makeImg("https://cdn.example/a.jpg", { getBoundingClientRect: () => rects.a.getBoundingClientRect() });
+  const b = makeImg("https://cdn.example/b.jpg", { getBoundingClientRect: () => rects.b.getBoundingClientRect() });
+  const env = await load({ imgs: [a, b], fetch: () => true, replies: { "am:page": () => new Promise(() => {}) } });
+  await env.intersect(a, {});
+  await env.intersect(b, {});
+  await env.fire(120); // the first report, scheduled by the requests
+  assert.equal(env.ofType("am:priorities").length, 1);
+  await env.fire(400); // nothing moved: nothing to say
+  assert.equal(env.ofType("am:priorities").length, 1);
+  rects.a = at(6000, 1200); // the carousel slid the page away; no scroll event
+  await env.fire(400);
+  const last = plain(env.ofType("am:priorities").at(-1).items);
+  assert.deepEqual(last.map((i) => i.key), ["https://cdn.example/a.jpg"], "only the page that changed");
+  assert.ok(last[0].d > 1.9);
+});
+
+test("priorities: the repeat stops when nothing is pending", async () => {
+  const env = await load({ fetch: () => true });
+  await env.intersect(env.imgs[0], {}); // answered at once, no bubbles to wait for? one bubble without text: pending
+  await env.message({ type: "am:bubble-text", pageId: "P", bubbleId: 0, text: "あ" });
+  await env.fire(120);
+  assert.equal(env.pendingTimers(400).length, 0);
 });

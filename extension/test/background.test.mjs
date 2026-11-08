@@ -100,6 +100,29 @@ test("am:page with the image bytes skips the host-permission check and passes th
   assert.deepEqual(sent.source, { dataUrl: png });
 });
 
+test("am:page passes the page key and its priority on to the engine, with the bytes and with a URL", async () => {
+  const priority = { d: 0.4, p: 0.65, n: 9 };
+  await handlers["am:page"]({ type: "am:page", imageUrl: "https://cdn.example/p.jpg#x", dataUrl: png, priority }, tab);
+  let sent = calls.sent.at(-1);
+  assert.equal(sent.key, "https://cdn.example/p.jpg#x");
+  assert.deepEqual(sent.priority, priority);
+  await handlers["am:page"]({ type: "am:page", imageUrl: "https://cdn.example/q.jpg", priority }, tab);
+  sent = calls.sent.at(-1);
+  assert.deepEqual(sent.source, { url: "https://cdn.example/q.jpg" });
+  assert.equal(sent.key, "https://cdn.example/q.jpg");
+  assert.deepEqual(sent.priority, priority);
+});
+
+test("am:priorities from a tab goes to the engine; from anything else it does not", async () => {
+  const items = [{ key: "https://cdn.example/p.jpg", d: 0, p: 0, n: 1 }];
+  const reply = await handlers["am:priorities"]({ type: "am:priorities", items }, tab);
+  assert.equal(reply.ok, true);
+  assert.deepEqual(calls.sent.at(-1), { target: "offscreen", type: "eng:priorities", items });
+  const before = calls.sent.length;
+  assert.deepEqual(await handlers["am:priorities"]({ type: "am:priorities", items }, {}), { ok: false });
+  assert.equal(calls.sent.length, before);
+});
+
 test("am:page rejects a bad or oversized data URL", async () => {
   const before = calls.sent.length;
   for (const dataUrl of ["https://x.example/p.jpg", 5, "data:" + "A".repeat(48 * 1024 * 1024)]) {
