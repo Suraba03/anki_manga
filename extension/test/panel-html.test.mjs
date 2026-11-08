@@ -51,8 +51,15 @@ test("deck: the select is named by its label alone; the state is announced polit
 test("Explanations: Free, own key and Off radios; a hint element and a delete-key button", () => {
   const values = [...html.matchAll(/<input type="radio" name="llm-mode" value="(\w+)">/g)].map((m) => m[1]);
   assert.deepEqual(values, ["free", "own", "off"]);
-  assert.match(html, /<input type="radio" name="llm-mode" value="off"> Off — nothing is sent<\/label>/);
+  assert.match(html, /<input type="radio" name="llm-mode" value="off"> Off — no bubble text is sent<\/label>/);
   assert.match(html, /<button id="delete-key" class="btn" type="button" hidden>Delete saved key<\/button>/);
-  assert.match(html, /<p id="llm-hint" class="hint"><\/p>/);
+  assert.match(html, /<p id="llm-hint" class="hint" aria-live="polite"><\/p>/);
+  assert.match(html, /<span id="llm-state" class="hint" aria-live="polite"><\/span>/);
+  assert.match(html, /<span id="own-state" class="hint" aria-live="polite"><\/span>/);
+  // Reachable in any mode: inside the fieldset, outside the own-key form (which is hidden unless "own" is chosen).
+  const fieldset = html.match(/<fieldset class="field">\s*<legend>Explanations<\/legend>[\s\S]*?<\/fieldset>/)[0];
+  assert.ok(fieldset.includes('id="delete-key"'), "inside the Explanations fieldset");
+  const form = fieldset.match(/<div id="own-key" hidden>[\s\S]*?<\/div>/)[0];
+  assert.ok(!form.includes('id="delete-key"'), "not inside #own-key");
   assert.doesNotMatch(html, /Only the text of the bubble you click is sent/);
 });

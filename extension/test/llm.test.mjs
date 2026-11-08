@@ -50,6 +50,15 @@ test("mode off: nothing is sent and the cache is not even read", async () => {
   assert.deepEqual(await explain(TEXT, { settings: off(), store, fetch, freeUrl: FREE_URL_TEST }), { ok: false, error: "explanations_off" });
 });
 
+test("an unknown mode fails closed like Off", async () => {
+  const fetch = async () => assert.fail("fetch must not be called");
+  const store = { explanationKey: async () => assert.fail("no cache"), getExplanation: async () => assert.fail("no cache"), putExplanation: async () => assert.fail("no cache") };
+  for (const mode of ["weird", "", "OFF"]) {
+    const settings = { installId: "i", llm: { ...off().llm, mode } };
+    assert.deepEqual(await explain(TEXT, { settings, store, fetch, freeUrl: FREE_URL_TEST }), { ok: false, error: "explanations_off" }, mode);
+  }
+});
+
 // ---- prompt (port of test_request_shape / parse tests) ----
 
 test("request shape: fixed system prompt first, user text second", () => {

@@ -1,6 +1,6 @@
 // The settings drawer: deck, explanation source (free / own key / off), text-recognition mode, delete data.
 import { getSettings, setSettings } from "../lib/settings.js";
-import { freeLeftText, ankiErrorMessage, ownKeyCheck, llmModeAfter, explanationsHint, validateBaseUrl, resolveDeck, deckChoice, deckForCard, deckTargetText, latestCall, deckChanged, DEFAULT_DECK } from "./logic.js";
+import { freeLeftText, ankiErrorMessage, ownKeyCheck, llmModeAfter, explanationsHint, deleteKeyOutcome, validateBaseUrl, resolveDeck, deckChoice, deckForCard, deckTargetText, latestCall, deckChanged, DEFAULT_DECK } from "./logic.js";
 import { deckNames, createDeck, forgetKnown } from "./anki.js";
 import { engine } from "./engine.js";
 import { state } from "./state.js";
@@ -91,7 +91,7 @@ let ownFormOpen = false;
 async function showLlm() {
   const { llm } = await getSettings();
   const showOwn = llm.mode === "own" || ownFormOpen;
-  const shown = showOwn ? "own" : llm.mode === "off" ? "off" : "free";
+  const shown = showOwn ? "own" : llm.mode === "free" ? "free" : "off"; // an unknown mode shows as Off
   document.querySelector(`input[name="llm-mode"][value="${shown}"]`).checked = true;
   $("llm-hint").textContent = explanationsHint(llm.mode); // what really happens, even while the own-key form is open
   $("free-left").hidden = llm.mode !== "free";
@@ -106,14 +106,16 @@ async function showLlm() {
 
 // Deleting the key from "own" turns explanations off; it never moves the text to the free server by itself.
 async function deleteKey() {
-  if (!confirm("Delete the saved API key from this browser?")) return;
   const { llm } = await getSettings();
-  const mode = llmModeAfter("delete_key", llm);
-  await setSettings({ llm: { apiKey: "", mode } });
-  ownFormOpen = true; // keep the form open so the message below is seen
+  const outcome = deleteKeyOutcome(llm, confirm("Delete the saved API key from this browser?"));
+  if (!outcome) return;
+  await setSettings({ llm: outcome.patch });
+  ownFormOpen = false;
   $("api-key").value = "";
-  $("own-state").textContent = mode !== llm.mode ? "Key deleted. Explanations are off until you choose Free or save a new key." : "Key deleted.";
+  $("own-state").textContent = "";
   await showLlm();
+  $("llm-state").textContent = outcome.message;
+  document.querySelector('input[name="llm-mode"]:checked').focus(); // the button just hid itself
 }
 
 async function showFreeLeft() {
@@ -151,6 +153,7 @@ async function saveOwn() {
   });
   ownFormOpen = false;
   $("api-key").value = "";
+  $("llm-state").textContent = "";
   say("Saved.");
   showLlm();
 }
@@ -187,6 +190,7 @@ export async function initSettings() {
     radio.addEventListener("change", async () => {
       const { llm } = await getSettings();
       ownFormOpen = radio.value === "own";
+      $("llm-state").textContent = "";
       const mode = llmModeAfter({ own: "select_own", off: "select_off" }[radio.value] || "select_free", llm);
       if (mode !== llm.mode) await setSettings({ llm: { mode } });
       showLlm();

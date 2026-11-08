@@ -11,6 +11,8 @@ import {
   shouldAskPermission,
   llmModeAfter,
   explanationsHint,
+  explainingOn,
+  deleteKeyOutcome,
   validateBaseUrl,
   freeRemainingAfterError,
   cardDoneState,
@@ -161,8 +163,26 @@ test("the hint under Explanations says where the text goes in each mode", () => 
     "The text of the bubble you click, a random install ID and the prompt version go to the project's server, which asks DeepSeek. The server also sees your network address (for the daily limit). Page images are not uploaded.",
   );
   assert.equal(explanationsHint("own"), "The text of the bubble you click goes from your browser to your provider, with your API key. Page images are not uploaded.");
-  assert.equal(explanationsHint("off"), "Nothing is sent. Reading, the dictionary and cards work without explanations.");
-  assert.equal(explanationsHint("anything else"), explanationsHint("free"));
+  assert.equal(explanationsHint("off"), "No bubble text is sent. Reading, the dictionary and cards work without explanations.");
+  assert.equal(explanationsHint("weird"), explanationsHint("off"), "an unknown mode reads as Off");
+  assert.equal(explanationsHint(undefined), explanationsHint("off"));
+});
+
+test("only free and own send text; any other mode is Off", () => {
+  assert.equal(explainingOn("free"), true);
+  assert.equal(explainingOn("own"), true);
+  for (const m of ["off", "weird", "", undefined, null]) assert.equal(explainingOn(m), false, String(m));
+});
+
+test("Delete saved key: nothing happens unless confirmed; own turns Off, other modes stay", () => {
+  assert.equal(deleteKeyOutcome({ mode: "own", apiKey: "sk-x" }, false), null);
+  assert.deepEqual(deleteKeyOutcome({ mode: "own", apiKey: "sk-x" }, true), {
+    patch: { apiKey: "", mode: "off" },
+    message: "Key deleted. Explanations are off until you choose Free or save a new key.",
+  });
+  assert.deepEqual(deleteKeyOutcome({ mode: "free", apiKey: "sk-x" }, true), { patch: { apiKey: "", mode: "free" }, message: "Key deleted." });
+  assert.deepEqual(deleteKeyOutcome({ mode: "off", apiKey: "sk-x" }, true), { patch: { apiKey: "", mode: "off" }, message: "Key deleted." });
+  assert.equal(deleteKeyOutcome({ mode: "own", apiKey: "" }, true), null, "no key, nothing to delete");
 });
 
 test("explanations_off has its own message and no side effects", () => {

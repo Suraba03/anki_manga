@@ -173,11 +173,24 @@ export function llmModeAfter(event, llm) {
   }
 }
 
-// What goes where, for the hint under Explanations. mode: "free" | "own" | "off" (anything else reads as "free").
+// Only "free" and "own" send bubble text; any other value (including a damaged one) counts as Off.
+export const explainingOn = (mode) => mode === "free" || mode === "own";
+
+// What goes where, for the hint under Explanations. mode: "free" | "own" | anything else reads as Off.
 export function explanationsHint(mode) {
-  if (mode === "off") return "Nothing is sent. Reading, the dictionary and cards work without explanations.";
   if (mode === "own") return "The text of the bubble you click goes from your browser to your provider, with your API key. Page images are not uploaded.";
+  if (!explainingOn(mode)) return "No bubble text is sent. Reading, the dictionary and cards work without explanations.";
   return "The text of the bubble you click, a random install ID and the prompt version go to the project's server, which asks DeepSeek. The server also sees your network address (for the daily limit). Page images are not uploaded.";
+}
+
+// "Delete saved key": null when not confirmed or there is no key; else the settings patch and the message to show.
+export function deleteKeyOutcome(llm, confirmed) {
+  if (!confirmed || !llm.apiKey) return null;
+  const mode = llmModeAfter("delete_key", llm);
+  return {
+    patch: { apiKey: "", mode },
+    message: mode !== llm.mode ? "Key deleted. Explanations are off until you choose Free or save a new key." : "Key deleted.",
+  };
 }
 
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
