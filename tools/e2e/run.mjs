@@ -4,12 +4,14 @@
 //   --smoke  end to end: serves the sample pages (ANKI_MANGA_SAMPLES) and the mirrored models (tools/.cache/mirror)
 //            on 127.0.0.1:47900, loads the first page in a tab and waits for the overlay to show its texts
 //   --first-run  start-up timings: serves the mirrored models (no samples needed), boots the engine on an empty
-//            profile (cold), restarts Chrome on the same profile (warm) and prints each stage of both starts
+//            profile (cold), restarts Chrome on the same profile (warm) and prints each stage of both starts and the
+//            peak memory of the extension process during each start.
+//            --real-host: download the models from their pinned URLs (GitHub) instead of the local mirror
 //   --probe  platform probe: offscreen document, WebGPU session, cross-origin fetch, AnkiConnect
 //            (the AnkiConnect probe runs only when ANKI_RUNNING=1)
 import { FREE_URL } from "../../extension/lib/llm.js";
 import { port } from "../ports.mjs";
-import { spawn, execFileSync } from "node:child_process";
+import { spawn, execFile, execFileSync } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, existsSync, createReadStream, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -28,6 +30,7 @@ const PROBE_FETCH_URL = "https://github.com/microsoft/onnxruntime/releases/downl
 
 const OUR_NAME = JSON.parse(readFileSync(join(EXTENSION, "manifest.json"), "utf8")).name;
 const mode = process.argv.includes("--smoke") ? "smoke" : process.argv.includes("--first-run") ? "first-run" : "probe";
+const realHost = process.argv.includes("--real-host");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function installChrome() {
@@ -316,7 +319,7 @@ async function restartAfterInstall(sw) {
 }
 
 // Creates the offscreen document and waits for modelStatus to settle; prints each status change on the way.
-async function bootEngine(sw) {
+async function bootEngine(sw, onStatus = () => {}) {
   const t0 = Date.now();
   let lastLine = "";
   await waitFor(() => sw.evaluate('typeof ensureOffscreen === "function"'), "background.js to load");
@@ -324,6 +327,7 @@ async function bootEngine(sw) {
   const status = await waitFor(async () => {
     const s = await sw.evaluate('chrome.storage.session.get("modelStatus").then((r) => r.modelStatus || null)');
     const bytes = s && s.totalBytes ? ` ${mb(s.receivedBytes)}/${mb(s.totalBytes)}${s.etaSec != null ? ` eta ${Math.round(s.etaSec)}s` : ""}` : "";
+    if (s) onStatus(s);
     const line = s && `${s.state} ${Math.round((s.progress || 0) * 100)}%${bytes}${s.ep ? ` ep=${s.ep}` : ""}${s.firstRun ? " firstRun" : ""}`;
     if (line !== lastLine) console.log(`  ${((Date.now() - t0) / 1000).toFixed(0)}s model status: ${(lastLine = line)}`);
     return s && (s.state === "ready" || s.state === "error") ? s : null; // waitFor swallows exceptions
@@ -351,9 +355,45 @@ function printTimings(status) {
   }
 }
 
-// Cold start (empty profile, models from the local mirror) and warm start (same profile after a browser restart).
-// Network time from the real model host is not part of this: the mirror is on 127.0.0.1.
-async function firstRun(launch) {
+// Peak resident memory while a start runs, from ps every 200 ms: the extension process (service worker and offscreen
+// document: model buffers live there) and the sum over all processes of this Chrome profile.
+// mark() keeps the peaks so far (e.g. when the download ends); stop() returns {marked, end}.
+function memorySampler(profile) {
+  let ext = 0;
+  let all = 0;
+  let marked = null;
+  let busy = false;
+  const timer = setInterval(() => {
+    if (busy) return;
+    busy = true;
+    execFile("ps", ["-axww", "-o", "rss=,command="], { maxBuffer: 1 << 24 }, (err, out) => {
+      busy = false;
+      if (err) return;
+      let e = 0;
+      let a = 0;
+      for (const line of out.split("\n")) {
+        if (!line.includes(profile)) continue;
+        const kb = parseInt(line, 10) || 0;
+        a += kb;
+        if (line.includes("--extension-process")) e += kb;
+      }
+      ext = Math.max(ext, e);
+      all = Math.max(all, a);
+    });
+  }, 200);
+  const now = () => ({ extMB: ext / 1024, allMB: all / 1024 });
+  return {
+    mark: () => (marked ||= now()),
+    stop: () => {
+      clearInterval(timer);
+      return { marked, end: now() };
+    },
+  };
+}
+
+// Cold start (empty profile, models from the local mirror, or from the real host with --real-host) and warm start
+// (same profile after a browser restart). With the mirror, network time from the real host is not part of this.
+async function firstRun(launch, profile) {
   const server = await startServer(null);
   try {
     const runs = [];
@@ -362,10 +402,16 @@ async function firstRun(launch) {
       const { sw, stop } = await launch();
       try {
         await waitFor(() => sw.evaluate('typeof handlers === "object"'), "background.js to load");
-        await sw.evaluate(`chrome.storage.local.set({devModelBase: ${JSON.stringify(`http://127.0.0.1:${SERVE_PORT}/models/`)}})`);
-        console.log(`--- ${kind} start`);
+        if (!realHost) await sw.evaluate(`chrome.storage.local.set({devModelBase: ${JSON.stringify(`http://127.0.0.1:${SERVE_PORT}/models/`)}})`);
+        console.log(`--- ${kind} start (models from ${realHost ? "the real host" : "the local mirror"})`);
         if (kind === "cold" && !(await restartAfterInstall(sw))) ok = false;
-        await bootEngine(sw);
+        const memory = memorySampler(profile);
+        await bootEngine(sw, (s) => s.state !== "downloading" && memory.mark()).finally(() => {
+          const { marked, end } = memory.stop();
+          const line = (m) => `extension process ${m.extMB.toFixed(0)} MB, all processes ${m.allMB.toFixed(0)} MB`;
+          if (marked) console.log(`  peak RSS while downloading: ${line(marked)}`);
+          console.log(`  peak RSS until ready: ${line(end)}`);
+        });
         // "ready" comes before the warm-up: how long does a page asked for right then take, and the next one?
         const origin = `http://127.0.0.1:${SERVE_PORT}`;
         await sw.evaluate(`handlers["am:enable-site"]({origin: ${JSON.stringify(origin)}}, {})`);
@@ -513,7 +559,7 @@ async function main() {
   const chromePath = installChrome();
   const profile = mkdtempSync(join(tmpdir(), "anki-manga-e2e-"));
   try {
-    if (mode === "first-run") return (await firstRun(() => launchChrome(chromePath, profile))) ? 0 : 1;
+    if (mode === "first-run") return (await firstRun(() => launchChrome(chromePath, profile), profile)) ? 0 : 1;
     const { sw, stop } = await launchChrome(chromePath, profile);
     try {
       if (mode === "smoke") return (await smoke(sw)) ? 0 : 1;
