@@ -5,6 +5,7 @@ import { PROMPT_VERSION, SYSTEM_PROMPT, parseExplanation, isRefusal } from "../.
 export const MAX_TEXT_CHARS = 300;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const NUMBER_VARS = ["DAILY_PER_INSTALL", "DAILY_PER_IP", "MONTHLY_CAP_USD", "PRICE_IN_HIT", "PRICE_IN_MISS", "PRICE_OUT"];
+const DEFAULT_FAILED_PER_IP = 20;
 const WARN_FRACTION = 0.8;
 const MAX_OUTPUT_TOKENS = 700; // the max_tokens worker.js sends
 
@@ -16,6 +17,11 @@ export function parseConfig(env) {
     if (env[name] === undefined || env[name] === "" || !Number.isFinite(n)) throw new Error(`bad config var ${name}`);
     config[name] = n;
   }
+  // DAILY_FAILED_PER_IP: paid calls that gave no explanation (a refusal, an unusable answer) per IP per day.
+  // Optional; they cost money but use no other quota, so without a ceiling a script could repeat them.
+  const failed = env.DAILY_FAILED_PER_IP === undefined || env.DAILY_FAILED_PER_IP === "" ? DEFAULT_FAILED_PER_IP : Number(env.DAILY_FAILED_PER_IP);
+  if (!Number.isFinite(failed)) throw new Error("bad config var DAILY_FAILED_PER_IP");
+  config.DAILY_FAILED_PER_IP = failed;
   return config;
 }
 
@@ -84,7 +90,15 @@ export async function handleExplain(body, { db, callLlm, now, ipHash, origin, co
   const hit = await db.getCache(key);
   if (hit) return reply(200, { result: hit }, remainingHeader(config.DAILY_PER_INSTALL, installUsed));
 
-  if (installUsed >= config.DAILY_PER_INSTALL || (await db.countIp(day, ipHash)) >= config.DAILY_PER_IP) {
+  // Paid calls that gave no explanation (a refusal, an unusable answer, an unreadable 200) are counted in
+  // ip_counts under their own "failed:" key, so they never eat the normal per-IP allowance (the daily cron
+  // prunes them with the rest). They are not cached, so a script could otherwise repeat them for free.
+  const failedKey = `failed:${ipHash}`;
+  if (
+    installUsed >= config.DAILY_PER_INSTALL ||
+    (await db.countIp(day, ipHash)) >= config.DAILY_PER_IP ||
+    (await db.countIp(day, failedKey)) >= config.DAILY_FAILED_PER_IP
+  ) {
     return err(429, "free_daily_limit");
   }
   const spentBefore = await db.getSpend(month);
@@ -107,7 +121,11 @@ export async function handleExplain(body, { db, callLlm, now, ipHash, origin, co
     out = await callLlm(text);
   } catch (e) {
     console.error("free tier: LLM call failed:", describeError(e));
-    if (e?.paid) await charge(e.usage); // HTTP 200 but unreadable: DeepSeek billed it
+    if (e?.paid) {
+      // HTTP 200 but unreadable: DeepSeek billed it
+      await charge(e.usage);
+      await db.incIp(day, failedKey);
+    }
     return err(502, "free_unavailable");
   }
   let result;
@@ -122,7 +140,8 @@ export async function handleExplain(body, { db, callLlm, now, ipHash, origin, co
       describeError(e),
       `finish_reason=${out?.finishReason ?? "?"} content_chars=${len}`,
     );
-    await charge(out?.usage); // paid, but no quota use and nothing cached
+    await charge(out?.usage); // paid, but no install/IP quota use and nothing cached
+    await db.incIp(day, failedKey);
     return refused ? err(422, "explanation_refused") : err(502, "free_unavailable");
   }
 
