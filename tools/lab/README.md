@@ -9,8 +9,8 @@ node tools/lab/run.mjs --sites=name1,name2    # some sites by name
 ```
 
 The site list is `tools/.cache/compat/sites.json` (shared with `tools/compat`, never committed): entries
-`{ "name", "url", "follow"?, "lab"? }`. `follow` is a regular expression for a link to open first (an index page
-whose chapter URL changes). Site names and URLs stay in that file: not in code, reports that are committed, commit
+`{ "name", "url", "follow"?, "lab"?, "resetCookies"? }`. `follow` is a regular expression for a link to open first (an index page
+whose chapter URL changes). `resetCookies: true` also clears the site's cookies before each run (see "Profile state"). Site names and URLs stay in that file: not in code, reports that are committed, commit
 messages or PRs.
 
 ## What it does, per site
@@ -33,8 +33,26 @@ messages or PRs.
 
 `tools/.cache/lab/runs/<stamp>-lane<offset>[-name]/`: `report.md`, `report.json`, and screenshots per site (the page at
 the first click, the panel, the page after scrolling). The report ends with the changes against this lane's previous
-run. The exit code is 1 when a step that passed last time does not pass now (✓ → ✗ or ✓ → –), when the run itself
-fails, or when a blocked request was attempted.
+run in the same profile state (see below). The exit code is 1 when a step that passed last time fails now (✓ → ✗), when a site newly ends in an error (a
+timeout), when the run itself fails, or when a blocked request was attempted. ✓ → – is listed but does not count: the
+step did not apply this time (a line without kanji), or an earlier step's ✓ → ✗ already counts.
+
+## Profile state
+
+The browser profile is kept between runs (models stay cached), and readers save the reading position in it: without a
+reset, a run reopens where the last run's scroll step left the reader (no manga in view, a 20 s fallback, a "regression"
+that is not one). So before each site the lab clears that site's storage (local storage, IndexedDB, cache storage,
+service workers, WebSQL, file systems, shader cache) for its listed origin and for the origins its tab ended on or
+framed in last time, recorded in `tools/.cache/lab/lane-<offset>/site-origins.json` (`{ "<site>": ["https://…"] }`,
+http(s) only, up to 20 per site). Cookies stay (logins, consent); a site whose position lives in a cookie gets
+`"resetCookies": true`. The extension's own data and anything not tied to a site are never cleared. A failed clear is
+noted in the site's page facts and the run goes on.
+
+The report records the state: `profile: fresh` (no profile directory before the browser started: `--profile=fresh` or a
+first run) or `profile: kept, site data reset` (`run.profile.state` in `report.json`: `fresh` or `kept-reset`; older
+runs have none and count as `unknown`). The diff compares with the last run in the **same** state, and names its stamp.
+With no such run it uses the latest run of any state, and the report and the console say `Profile state differs: …`
+because steps and timings may differ for that reason.
 
 ## Options
 
@@ -75,7 +93,7 @@ cache is shared.
 ## Tests
 
 `node --test tools/lab/lab.test.mjs` covers the pure parts (option parsing, the explanation source, the report and
-the diff).
+the diff, the profile state and the origins to clear).
 
 ## Debugging a site
 

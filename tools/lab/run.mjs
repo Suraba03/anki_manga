@@ -22,7 +22,8 @@ import { port, PORT_OFFSET } from "../ports.mjs";
 import { FREE_URL } from "../../extension/lib/llm.js";
 import { PROMPT_VERSION } from "../../extension/lib/prompt.js";
 import { parseLlmMode, cacheKey, createBudget, answerFor, userText, chatPayload } from "./llm.mjs";
-import { STEPS, combine, diffRuns, regressed, renderMarkdown } from "./report.mjs";
+import { STEPS, combine, diffRuns, regressed, renderMarkdown, profileLabel, stateOf, pickPrevious, updateLatest, stateWarning } from "./report.mjs";
+import { httpOrigins, mergeOrigins, originsToClear, clearTypes } from "./origins.mjs";
 
 // ---- options -----------------------------------------------------------------------------------------------------
 const args = process.argv.slice(2);
@@ -59,7 +60,8 @@ const LLM_CACHE = join(LAB, "llm-cache.json");
 const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
 const outName = typeof flag("out") === "string" ? `-${flag("out")}` : "";
 const OUT = join(LAB, "runs", `${stamp}-lane${PORT_OFFSET}${outName}`);
-const LATEST = join(LANE_DIR, "latest.json"); // {report: path of this lane's previous report.json}
+const LATEST = join(LANE_DIR, "latest.json"); // {report: last report.json, byState: {fresh | kept-reset: report.json}}
+const SITE_ORIGINS = join(LANE_DIR, "site-origins.json"); // {site name: origins its tab ended on or framed in}
 const CDP_PORT = port(9361);
 const SERVE_PORT = port(47931);
 const FAKE_ANKI_PORT = port(8786);
@@ -228,6 +230,34 @@ async function pointPanelAt(panel, tab) {
   await panel.evaluate(`sessionStorage.setItem("labTab", ${jsonOf(JSON.stringify(tab))})`);
   await panel.send("Page.navigate", { url: panel.url });
   await waitFor(() => panel.evaluate('document.readyState === "complete" && !!document.getElementById("entries")'), "the panel", 15000);
+}
+
+// ---- the site's own data ---------------------------------------------------------------------------------------------
+// Readers save the reading position in the profile; a kept profile would reopen where the last run's scroll left it.
+// So before a site, its storage is cleared (cookies stay unless the site says "resetCookies": logins and consent).
+// The origins: the listed one and those the site's tab ended on or framed in last time (site-origins.json).
+const readOrigins = () => (existsSync(SITE_ORIGINS) ? JSON.parse(readFileSync(SITE_ORIGINS, "utf8")) : {});
+
+async function clearSiteData(cleaner, site) {
+  const failed = [];
+  for (const origin of originsToClear(site, readOrigins())) {
+    try {
+      await cleaner.send("Storage.clearDataForOrigin", { origin, storageTypes: clearTypes(site) });
+    } catch (e) {
+      failed.push(`${origin}: ${e.message}`);
+    }
+  }
+  return failed;
+}
+
+// After a site: where its tab ended and the frames it had (http(s) only), merged into site-origins.json.
+async function recordOrigins(tab, site) {
+  const urls = [await tab.evaluate("location.href").catch(() => null)];
+  const walk = (n) => (urls.push(n.frame.url), (n.childFrames || []).forEach(walk));
+  const tree = await tab.send("Page.getFrameTree").catch(() => null);
+  if (tree) walk(tree.frameTree);
+  const found = httpOrigins(urls);
+  if (found.length) writeFileSync(SITE_ORIGINS, JSON.stringify(mergeOrigins(readOrigins(), site.name, found), null, 1));
 }
 
 // ---- the page ------------------------------------------------------------------------------------------------------
@@ -497,7 +527,7 @@ async function runSite(site, ctx, res) {
   facts = await tab.evaluate(PAGE_FACTS).catch(() => facts);
   const ps = await panelState().catch(() => null);
   const finalOrigin = await tab.evaluate("location.origin").catch(() => null);
-  if (finalOrigin && finalOrigin !== new URL(site.url).origin && !site.follow) res.facts = `ended on another origin than the listed one; `;
+  if (finalOrigin && finalOrigin !== new URL(site.url).origin && !site.follow) res.facts = (res.facts || "") + `ended on another origin than the listed one; `;
   res.facts = (res.facts || "") + (!facts ? "page not readable" : `${facts.layers} pages, ${facts.bubblesRead}/${facts.bubbles} bubbles read; badges: ${facts.badges.join("; ") || "none"}` +
     (ps?.missingHosts.length ? `; asks for ${ps.missingHosts.length} image host(s)` : "") + (ps?.captureBlocked ? "; screenshots blocked" : ""));
   res.llm = safety.llm.slice(llmBefore);
@@ -509,6 +539,7 @@ async function main() {
   mkdirSync(OUT, { recursive: true });
   mkdirSync(LANE_DIR, { recursive: true });
   if (profileMode === "fresh") rmSync(PROFILE, { recursive: true, force: true });
+  const profileState = existsSync(PROFILE) ? "kept-reset" : "fresh"; // before Chrome creates it
   // A fresh copy of this checkout's extension at a stable path (the unpacked ID, and with it the cached models, stay).
   // Its manifest lists the sites' origins: a granted host permission needs a user gesture in a real browser, and this
   // is the same grant without one ("Enable on this site"; --grant-all adds <all_urls>, as after every "Allow …").
@@ -530,7 +561,7 @@ async function main() {
     `--user-agent=${chromeUserAgent(chromePath)}`, "--lang=ja", `--window-size=${VIEW.w},${VIEW.h}`,
     `--remote-debugging-port=${CDP_PORT}`, `--user-data-dir=${PROFILE}`, "--no-first-run", "about:blank",
   ]);
-  const run = { stamp, lane: LANE, meta: {}, sites: [] };
+  const run = { stamp, lane: LANE, profile: { state: profileState }, meta: {}, sites: [] };
   const ctx = { anki };
   let fatal = null;
   try {
@@ -576,6 +607,7 @@ async function main() {
     if (status.state === "error") throw new Error(`engine failed to start: ${status.error}`);
     const extId = await sw.evaluate("chrome.runtime.id");
     run.meta = {
+      profile: profileLabel(profileState),
       engine: `${status.ep}, mode ${status.mode}, settled in ${((Date.now() - t0) / 1000).toFixed(1)} s`,
       llm: llm.mode === "live" ? `live (budget ${llm.budget})` : llm.mode,
       grants: grantAll ? "all (as after every Allow …)" : "the site origins (as after Enable on this site)",
@@ -583,6 +615,8 @@ async function main() {
     };
     console.log(`lab lane ${LANE}: ${sites.length} site(s), engine ${run.meta.engine}, llm ${run.meta.llm}`);
     ctx.panel = await openPanel(extId);
+    // Storage.clearDataForOrigin answers "Internal error" on the browser target; a page target accepts it.
+    ctx.cleaner = await newWindow(400, 300);
 
     for (const [i, site] of sites.entries()) {
       process.stdout.write(`== ${site.name} … `);
@@ -593,6 +627,8 @@ async function main() {
       // The steps reached so far stay in the report when the site runs out of time. A timed-out site cannot touch
       // the panel or the service worker any more (it would click into the next site's entries).
       const res = { name: site.name, steps: Object.fromEntries(STEPS.map((k) => [k, { ok: null }])), timings: {}, llm: [] };
+      const cleared = await clearSiteData(ctx.cleaner, site);
+      if (cleared.length) res.facts = `could not clear site data (${cleared.join("; ")}); `;
       let dead = false;
       const fence = (cdp) => new Proxy(cdp, {
         get: (t, p) => (dead && (p === "evaluate" || p === "send") ? () => Promise.reject(new Error("site timed out")) : typeof t[p] === "function" ? t[p].bind(t) : t[p]),
@@ -610,6 +646,7 @@ async function main() {
         res.error = String(e.message || e);
       } finally {
         if (siteCtx.tab) {
+          await Promise.race([recordOrigins(siteCtx.tab, site), sleep(5000)]).catch(() => {});
           await fetch(`${base}/json/close/${siteCtx.tab.targetId}`).catch(() => {});
           siteCtx.tab.close();
         }
@@ -627,6 +664,7 @@ async function main() {
   } finally {
     ctx.panel?.close();
     ctx.sw?.close();
+    ctx.cleaner?.close();
     const exited = new Promise((r) => chrome.once("exit", r));
     chrome.kill();
     await Promise.race([exited, sleep(10000)]);
@@ -637,13 +675,17 @@ async function main() {
 
   run.meta.safety = `${safety.redirected} AnkiConnect request(s) redirected to the fake; blocked: ${safety.blocked.length ? safety.blocked.join(", ") : "none"}`;
   run.meta.explanations = summarizeLlm(safety.llm);
-  const prevFile = existsSync(LATEST) ? JSON.parse(readFileSync(LATEST, "utf8")).report : null;
-  const prev = prevFile && existsSync(prevFile) ? JSON.parse(readFileSync(prevFile, "utf8")) : null;
+  const latest = existsSync(LATEST) ? JSON.parse(readFileSync(LATEST, "utf8")) : null;
+  const picked = pickPrevious(latest, profileState, existsSync);
+  const prev = picked ? JSON.parse(readFileSync(picked.file, "utf8")) : null;
   const diff = diffRuns(prev, run);
   writeFileSync(join(OUT, "report.json"), JSON.stringify(run, null, 2));
-  writeFileSync(join(OUT, "report.md"), renderMarkdown(run, diff));
-  if (!fatal && run.sites.length) writeFileSync(LATEST, JSON.stringify({ report: join(OUT, "report.json") }));
+  writeFileSync(join(OUT, "report.md"), renderMarkdown(run, diff, prev ? { prevStamp: prev.stamp, prevState: stateOf(prev), state: profileState } : {}));
+  if (!fatal && run.sites.length) writeFileSync(LATEST, JSON.stringify(updateLatest(latest, join(OUT, "report.json"), profileState)));
   console.log(`\nreport: ${join(OUT, "report.md")}`);
+  if (prev) console.log(`compared with ${prev.stamp} (profile: ${profileLabel(stateOf(prev))})`);
+  const warning = prev && stateWarning(profileState, stateOf(prev));
+  if (warning) console.log(warning);
   for (const d of diff) console.log(`  ${d.site}: ${d.step} ${d.from}→${d.to}${d.regression ? " (regression)" : ""}`);
   if (fatal) {
     console.error(`lab failed: ${fatal.message}`);
