@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { ensureFiles, clearModels, buildModelSets } from "../engine/models.js";
+import { ensureFiles, clearModels, buildModelSets, DOWNLOAD_STREAMS } from "../engine/models.js";
 
 const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const bytesOf = (s) => new TextEncoder().encode(s);
@@ -88,7 +88,7 @@ test("a cached file with the wrong hash is dropped and fetched again", async () 
 test("wrong bytes -> model_corrupt; earlier verified files stay cached, the bad one is not stored, the next call fetches only it", async () => {
   const cache = fakeCache();
   const bad = { ...served(), [files[1].url]: bytesOf("evil-bytes-same-hash-no") };
-  await assert.rejects(ensureFiles(files, { cache, fetch: fakeFetch(bad), onProgress() {} }), { error: "model_corrupt" });
+  await assert.rejects(ensureFiles(files, { cache, fetch: fakeFetch(bad), onProgress() {}, streams: 1 }), { error: "model_corrupt" });
   assert.deepEqual([...cache.store.keys()], [files[0].url]);
   assert.equal(cache.puts, 1);
 
@@ -143,7 +143,7 @@ test("three files, third stream dies mid-way -> first two stay cached, retry fet
     }
     return new Response(url === three[0].url ? A : B);
   };
-  await assert.rejects(ensureFiles(three, { cache, fetch: dying, onProgress() {} }), { error: "model_download_failed" });
+  await assert.rejects(ensureFiles(three, { cache, fetch: dying, onProgress() {}, streams: 1 }), { error: "model_download_failed" });
   assert.deepEqual([...cache.store.keys()], [three[0].url, three[1].url]);
 
   const fetch = fakeFetch({ [three[2].url]: C });
@@ -322,4 +322,204 @@ test("per-file timings: cache read + hash for a hit, download + hash + cache wri
   assert.equal(b.source, "network");
   assert.equal(b.bytes, B.length);
   assert.ok(b.downloadMs > 0 && b.hashMs > 0 && b.putMs > 0);
+});
+
+// ---- parallel downloads -------------------------------------------------------------------------------------------
+
+const C_BYTES = bytesOf("gamma-bytes-ZZZZZZZZZZZZZZZZZZZZZZZZ");
+const D_BYTES = bytesOf("delta-bytes-0000000000000000000000000000");
+const four = [...files, entry("c.onnx", C_BYTES), entry("d.onnx", D_BYTES)];
+const servedFour = () => ({ ...served(), [four[2].url]: C_BYTES, [four[3].url]: D_BYTES });
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function until(cond, what = "condition") {
+  for (let i = 0; i < 500; i++) {
+    if (cond()) return;
+    await sleep(2);
+  }
+  assert.fail(`timed out waiting for ${what}`);
+}
+
+// Every body is held back until st.openAll(); st.max is the most files in flight (from the fetch call until the body ended).
+function gatedFetch(serve) {
+  const st = { calls: [], inflight: 0, max: 0, open: false, waiters: [] };
+  st.openAll = () => {
+    st.open = true;
+    st.waiters.forEach((r) => r());
+  };
+  const gate = () => (st.open ? Promise.resolve() : new Promise((r) => st.waiters.push(r)));
+  const fn = async (url) => {
+    st.calls.push(url);
+    st.max = Math.max(st.max, ++st.inflight);
+    return new Response(
+      new ReadableStream({
+        async pull(c) {
+          await gate();
+          c.enqueue(serve[url]);
+          c.close();
+          st.inflight--;
+        },
+      }),
+    );
+  };
+  fn.st = st;
+  return fn;
+}
+
+test("at most `streams` files are in flight, and the default is DOWNLOAD_STREAMS", async () => {
+  assert.equal(DOWNLOAD_STREAMS, 3);
+  for (const [opts, expected] of [[{ streams: 2 }, 2], [{ streams: 3 }, 3], [{}, DOWNLOAD_STREAMS]]) {
+    const cache = fakeCache();
+    const fetch = gatedFetch(servedFour());
+    const run = ensureFiles(four, { cache, fetch, onProgress() {}, ...opts });
+    await until(() => fetch.st.calls.length === expected, `${expected} fetches`);
+    await sleep(30);
+    assert.equal(fetch.st.calls.length, expected, "no further file starts while the streams are busy");
+    fetch.st.openAll();
+    const out = await run;
+    assert.equal(fetch.st.max, expected);
+    assert.deepEqual([...out.keys()], four.map((f) => f.name));
+    assert.equal(cache.store.size, 4);
+  }
+});
+
+test("files are fetched in input order, the first one (the detector) first", async () => {
+  const fetch = gatedFetch(servedFour());
+  fetch.st.openAll();
+  await ensureFiles(four, { cache: fakeCache(), fetch, onProgress() {}, streams: 3 });
+  assert.deepEqual(fetch.st.calls, four.map((f) => f.url));
+});
+
+test("progress sums the bytes of all streams and stays monotonic", async () => {
+  const cache = fakeCache();
+  const ctl = {};
+  const fetch = async (url) => new Response(new ReadableStream({ start: (c) => (ctl[url] = c) }));
+  const seen = [];
+  const run = ensureFiles(files, { cache, fetch, onProgress: (p, i) => seen.push([p, i.receivedBytes, i.totalBytes]), streams: 2 });
+  const [a, b] = files;
+  await until(() => ctl[a.url] && ctl[b.url], "both streams");
+  const ha = Math.floor(A.length / 2);
+  const hb = Math.floor(B.length / 2);
+  ctl[a.url].enqueue(A.slice(0, 3));
+  ctl[b.url].enqueue(B.slice(0, 3));
+  ctl[a.url].enqueue(A.slice(3, ha));
+  ctl[b.url].enqueue(B.slice(3, hb));
+  await until(() => seen.at(-1)[1] === ha + hb, "bytes of both files");
+  assert.equal(cache.store.size, 0, "neither file has finished yet");
+  ctl[a.url].enqueue(A.slice(ha));
+  ctl[a.url].close();
+  ctl[b.url].enqueue(B.slice(hb));
+  ctl[b.url].close();
+  await run;
+  const total = A.length + B.length;
+  assert.deepEqual(seen[0], [0, 0, total]);
+  assert.deepEqual(seen.at(-1), [1, total, total]);
+  for (let i = 0; i < seen.length; i++) {
+    assert.ok(seen[i][1] <= total);
+    if (i > 0) assert.ok(seen[i][0] >= seen[i - 1][0] && seen[i][1] >= seen[i - 1][1]);
+    if (i < seen.length - 1) assert.ok(seen[i][0] < 1);
+  }
+});
+
+test("one failure cancels the other streams, keeps the verified file, and nothing is stored after the rejection", async () => {
+  const three = [...files, four[2]];
+  const cache = fakeCache();
+  let release500;
+  const gate500 = new Promise((r) => (release500 = r));
+  let bSignal;
+  let bCancelled = false;
+  const fetch = async (url, opts) => {
+    if (url === three[0].url) return new Response(A);
+    if (url === three[1].url) {
+      bSignal = opts?.signal;
+      return new Response(
+        new ReadableStream({
+          start(c) {
+            c.enqueue(B.slice(0, 5)); // then held open
+          },
+          cancel() {
+            bCancelled = true;
+          },
+        }),
+      );
+    }
+    await gate500;
+    return new Response("boom", { status: 500 });
+  };
+  const outcome = assert.rejects(ensureFiles(three, { cache, fetch, onProgress() {}, streams: 3 }), { error: "model_download_failed" });
+  await until(() => cache.store.has(three[0].url) && bSignal, "a stored and b streaming");
+  release500();
+  await outcome;
+  assert.equal(bSignal.aborted, true);
+  assert.equal(bCancelled, true);
+  assert.deepEqual([...cache.store.keys()], [three[0].url]);
+  const puts = cache.puts;
+  await sleep(30);
+  assert.equal(cache.puts, puts, "no cache.put after the rejection");
+
+  const retry = fakeFetch({ [three[1].url]: B, [three[2].url]: C_BYTES });
+  const out = await ensureFiles(three, { cache, fetch: retry, onProgress() {} });
+  assert.deepEqual(retry.fetched, [three[1].url, three[2].url]);
+  assert.equal(out.size, 3);
+});
+
+test("a corrupt file is never stored when another file downloads fine at the same time", async () => {
+  const cache = fakeCache();
+  const evil = new Uint8Array(B.length).fill(7);
+  const fetch = fakeFetch({ ...served(), [files[1].url]: evil });
+  await assert.rejects(ensureFiles(files, { cache, fetch, onProgress() {} }), { error: "model_corrupt" });
+  assert.equal(cache.store.has(files[1].url), false);
+});
+
+test("the first error wins: an aborted stream's own error does not replace it", async () => {
+  const three = [...files, four[2]];
+  const cache = fakeCache();
+  const fetch = async (url, opts) => {
+    if (url === three[0].url) return new Response(A);
+    if (url === three[1].url) {
+      return new Response(
+        new ReadableStream({
+          start(c) {
+            c.enqueue(B.slice(0, 5)); // held open; errors out when aborted, like a real fetch
+            opts.signal.addEventListener("abort", () => c.error(new Error("aborted by signal")));
+          },
+        }),
+      );
+    }
+    return new Response(new Uint8Array(C_BYTES.length).fill(9)); // same length, wrong bytes
+  };
+  await assert.rejects(ensureFiles(three, { cache, fetch, onProgress() {}, streams: 3 }), { error: "model_corrupt" });
+  assert.equal(cache.store.has(three[2].url), false);
+  assert.equal(cache.store.has(three[1].url), false);
+});
+
+test("a file fully received before the abort is still verified and stored, and the call waits for it", async () => {
+  const cache = fakeCache();
+  const put = cache.put;
+  let putEntered = false;
+  let releasePut;
+  const putGate = new Promise((r) => (releasePut = r));
+  cache.put = async (url, res) => {
+    putEntered = true;
+    await putGate;
+    return put.call(cache, url, res);
+  };
+  let aSignal;
+  const fetch = async (url, opts) => {
+    if (url === files[0].url) {
+      aSignal = opts?.signal;
+      return new Response(A);
+    }
+    while (!putEntered) await sleep(1);
+    return new Response("boom", { status: 500 });
+  };
+  let settled = false;
+  const outcome = assert.rejects(ensureFiles(files, { cache, fetch, onProgress() {}, streams: 2 }), { error: "model_download_failed" }).then(() => (settled = true));
+  await until(() => aSignal?.aborted, "the abort");
+  await sleep(30);
+  assert.equal(settled, false, "ensureFiles waits for the file that is being stored");
+  assert.equal(cache.store.has(files[0].url), false);
+  releasePut();
+  await outcome;
+  assert.deepEqual([...cache.store.keys()], [files[0].url]);
 });

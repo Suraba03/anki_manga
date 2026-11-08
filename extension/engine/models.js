@@ -10,6 +10,9 @@ export class ModelError extends Error {
   }
 }
 
+// How many files download at once; the number will be tuned by measurement.
+export const DOWNLOAD_STREAMS = 3;
+
 const SLOTS = ["det", "enc", "dec", "vocab"];
 
 // Turns the parsed manifest into {webgpu:{det,enc,dec,vocab}, wasm:{...}, data:{}}. The caller supplies the
@@ -40,7 +43,9 @@ async function sha256Hex(buf) {
 
 // Reads the body into a buffer preallocated from the manifest size, reporting each chunk through onBytes.
 // A body longer than `size` is cut off (reader cancelled) and rejected as model_corrupt, so memory stays bounded.
-async function readBody(res, size, onBytes) {
+// If `signal` aborts before the whole body is in, the reader is cancelled and the read throws (an explicit check:
+// a real fetch rejects the pending read on abort, but a stream that merely stalls would not).
+async function readBody(res, size, onBytes, signal) {
   const out = new Uint8Array(size);
   let at = 0;
   const take = (chunk) => {
@@ -55,10 +60,16 @@ async function readBody(res, size, onBytes) {
     return { out, length: at };
   }
   const reader = res.body.getReader();
+  const onAbort = () => reader.cancel().catch(() => {});
+  signal?.addEventListener("abort", onAbort);
   try {
     for (;;) {
+      if (signal?.aborted && at < size) throw new Error("aborted");
       const { done, value } = await reader.read();
-      if (done) break;
+      if (done) {
+        if (signal?.aborted && at < size) throw new Error("aborted");
+        break;
+      }
       if (!take(value)) {
         await reader.cancel().catch(() => {});
         throw new ModelError("model_corrupt", "longer than expected");
@@ -67,19 +78,31 @@ async function readBody(res, size, onBytes) {
   } catch (e) {
     await reader.cancel().catch(() => {});
     throw e;
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
   }
   return { out, length: at };
 }
 
 // files: [{name,url,sha256,bytes}]. cache: {match,put,delete} (Cache Storage subset). Resolves to
-// Map<name, ArrayBuffer> of verified bytes. A cached file is re-hashed and dropped if it no longer matches.
+// Map<name, ArrayBuffer> of verified bytes, in input order. A cached file is re-hashed and dropped if it no longer
+// matches. The cache check is sequential; then the missing files download through `streams` concurrent streams
+// (default DOWNLOAD_STREAMS), taken from the list in input order, so the first file (the detector) starts first.
 // Each file is cached as soon as it verifies (a later failure keeps the earlier ones: resume per file);
 // a file that fails verification is never stored.
+// The first failure wins: it is the rejection value, the shared AbortController aborts the other streams (their
+// own errors are ignored) and no new file starts. A file whose bytes were all received before the abort is still
+// verified and stored. ensureFiles rejects only after every in-flight download has settled, so nothing is written
+// to the cache once the returned promise has rejected.
 // onProgress(fraction, {receivedBytes, totalBytes, files}): totalBytes counts only the files that need downloading
-// (0 on a warm start) and is announced once the cache is checked, before the first byte. `files` holds a timing
-// record per finished file: {name, source: "cache", bytes, readMs, hashMs} or
-// {name, source: "network", bytes, downloadMs, hashMs, putMs}.
-export async function ensureFiles(files, { cache, fetch: fetchFn = globalThis.fetch, onProgress = () => {}, now = () => performance.now() }) {
+// (0 on a warm start) and is announced once the cache is checked, before the first byte; receivedBytes is summed
+// over all streams. `files` holds a timing record per finished file, in completion order: {name, source: "cache",
+// bytes, readMs, hashMs} or {name, source: "network", bytes, downloadMs, hashMs, putMs}. Downloads overlap, so the
+// downloadMs spans of parallel files overlap too.
+export async function ensureFiles(
+  files,
+  { cache, fetch: fetchFn = globalThis.fetch, onProgress = () => {}, now = () => performance.now(), streams = DOWNLOAD_STREAMS },
+) {
   const result = new Map();
   const missing = [];
   const timings = [];
@@ -105,19 +128,34 @@ export async function ensureFiles(files, { cache, fetch: fetchFn = globalThis.fe
   const info = () => ({ receivedBytes: received, totalBytes, files: timings.slice() });
   const report = () => onProgress(totalBytes ? Math.min(received / totalBytes, 0.999) : 0, info());
   report();
-  for (const f of missing) {
+
+  const controller = new AbortController();
+  const { signal } = controller;
+  let firstError = null;
+  const fail = (e) => {
+    if (firstError) return; // an error caused by the abort (or a later one) never replaces the first
+    firstError = e;
+    controller.abort();
+  };
+
+  const download = async (f) => {
     let body;
     const t0 = now();
     try {
-      const res = await fetchFn(f.url);
+      const res = await fetchFn(f.url, { signal });
       if (!res.ok) {
         await res.body?.cancel().catch(() => {});
         throw new Error(`HTTP ${res.status}`);
       }
-      body = await readBody(res, f.bytes, (n) => {
-        received += n;
-        report();
-      });
+      body = await readBody(
+        res,
+        f.bytes,
+        (n) => {
+          received += n;
+          if (!firstError) report();
+        },
+        signal,
+      );
     } catch (e) {
       if (e instanceof ModelError) throw e;
       throw new ModelError("model_download_failed", `${f.name}: ${e?.message || e}`);
@@ -133,7 +171,20 @@ export async function ensureFiles(files, { cache, fetch: fetchFn = globalThis.fe
     }
     timings.push({ name: f.name, source: "network", bytes: body.length, downloadMs: t1 - t0, hashMs: t2 - t1, putMs: now() - t2 });
     result.set(f.name, body.out.buffer);
-  }
+  };
+
+  let next = 0;
+  const worker = async () => {
+    while (!firstError && next < missing.length) {
+      try {
+        await download(missing[next++]);
+      } catch (e) {
+        fail(e);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, streams), missing.length) }, worker));
+  if (firstError) throw firstError;
   onProgress(1, info());
   return new Map(files.map((f) => [f.name, result.get(f.name)]));
 }
