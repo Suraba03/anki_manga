@@ -367,7 +367,7 @@ function gatedFetch(serve) {
 }
 
 test("at most `streams` files are in flight, and the default is DOWNLOAD_STREAMS", async () => {
-  assert.equal(DOWNLOAD_STREAMS, 3);
+  assert.equal(DOWNLOAD_STREAMS, 1);
   for (const [opts, expected] of [[{ streams: 2 }, 2], [{ streams: 3 }, 3], [{}, DOWNLOAD_STREAMS]]) {
     const cache = fakeCache();
     const fetch = gatedFetch(servedFour());
@@ -522,4 +522,57 @@ test("a file fully received before the abort is still verified and stored, and t
   releasePut();
   await outcome;
   assert.deepEqual([...cache.store.keys()], [files[0].url]);
+});
+
+// ---- verification overlaps the next download ---------------------------------------------------------------------
+
+test("with one stream the next file starts downloading while the previous one is being stored", async () => {
+  const cache = fakeCache();
+  const put = cache.put;
+  let releasePut;
+  const putGate = new Promise((r) => (releasePut = r));
+  cache.put = async (url, res) => {
+    await putGate;
+    return put.call(cache, url, res);
+  };
+  const fetch = fakeFetch(served());
+  let settled = false;
+  const run = ensureFiles(files, { cache, fetch, onProgress() {}, streams: 1 }).then((out) => {
+    settled = true;
+    return out;
+  });
+  await until(() => fetch.fetched.length === 2, "b fetched while a's put is still held");
+  await sleep(30);
+  assert.equal(cache.store.size, 0, "no put has resolved yet");
+  assert.equal(settled, false, "the call waits for the pending puts");
+  releasePut();
+  const out = await run;
+  assert.deepEqual([...out.keys()], ["a.onnx", "b.onnx"]);
+  assert.deepEqual([...cache.store.keys()].sort(), files.map((f) => f.url).sort());
+});
+
+test("with one stream a corrupt file that is being verified aborts the next download; neither file is stored", async () => {
+  const cache = fakeCache();
+  let bSignal;
+  let bCancelled = false;
+  const fetch = async (url, opts) => {
+    if (url === files[0].url) return new Response(new Uint8Array(A.length).fill(7)); // same length, wrong bytes
+    bSignal = opts?.signal;
+    return new Response(
+      new ReadableStream({
+        start(c) {
+          c.enqueue(B.slice(0, 5)); // then held open
+        },
+        cancel() {
+          bCancelled = true;
+        },
+      }),
+    );
+  };
+  await assert.rejects(ensureFiles(files, { cache, fetch, onProgress() {}, streams: 1 }), { error: "model_corrupt" });
+  assert.ok(bSignal, "b started downloading before a was judged");
+  assert.equal(bSignal.aborted, true);
+  assert.equal(bCancelled, true);
+  assert.equal(cache.store.size, 0);
+  assert.equal(cache.puts, 0);
 });

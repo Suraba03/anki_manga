@@ -10,8 +10,10 @@ export class ModelError extends Error {
   }
 }
 
-// How many files download at once; the number will be tuned by measurement.
-export const DOWNLOAD_STREAMS = 3;
+// How many files download at once. Chrome multiplexes parallel fetches to the same host over one HTTP/2 connection,
+// which measured no faster than one stream from GitHub (E1-6, 2026-11-08); the pool stays for a host where more
+// connections help.
+export const DOWNLOAD_STREAMS = 1;
 
 const SLOTS = ["det", "enc", "dec", "vocab"];
 
@@ -88,17 +90,21 @@ async function readBody(res, size, onBytes, signal) {
 // Map<name, ArrayBuffer> of verified bytes, in input order. A cached file is re-hashed and dropped if it no longer
 // matches. The cache check is sequential; then the missing files download through `streams` concurrent streams
 // (default DOWNLOAD_STREAMS), taken from the list in input order, so the first file (the detector) starts first.
+// The cap counts downloads only: once a file's body is in, its stream takes the next file at once while the
+// verification (length + SHA-256) and the cache write of the finished file run concurrently.
 // Each file is cached as soon as it verifies (a later failure keeps the earlier ones: resume per file);
 // a file that fails verification is never stored.
 // The first failure wins: it is the rejection value, the shared AbortController aborts the other streams (their
 // own errors are ignored) and no new file starts. A file whose bytes were all received before the abort is still
-// verified and stored. ensureFiles rejects only after every in-flight download has settled, so nothing is written
-// to the cache once the returned promise has rejected.
+// verified and stored. A verify or cache failure is a failure like any other. ensureFiles settles only after every
+// download and every pending verify/put has settled, so nothing is written to the cache once the returned promise
+// has settled.
 // onProgress(fraction, {receivedBytes, totalBytes, files}): totalBytes counts only the files that need downloading
 // (0 on a warm start) and is announced once the cache is checked, before the first byte; receivedBytes is summed
 // over all streams. `files` holds a timing record per finished file, in completion order: {name, source: "cache",
-// bytes, readMs, hashMs} or {name, source: "network", bytes, downloadMs, hashMs, putMs}. Downloads overlap, so the
-// downloadMs spans of parallel files overlap too.
+// bytes, readMs, hashMs} or {name, source: "network", bytes, downloadMs, hashMs, putMs}.
+// Downloads overlap (with each other when streams > 1, and with the previous file's hash and put), so the spans of
+// different files overlap too.
 export async function ensureFiles(
   files,
   { cache, fetch: fetchFn = globalThis.fetch, onProgress = () => {}, now = () => performance.now(), streams = DOWNLOAD_STREAMS },
@@ -138,8 +144,8 @@ export async function ensureFiles(
     controller.abort();
   };
 
+  // Fetches and reads the whole body; the download slot is free as soon as this returns.
   const download = async (f) => {
-    let body;
     const t0 = now();
     try {
       const res = await fetchFn(f.url, { signal });
@@ -147,7 +153,7 @@ export async function ensureFiles(
         await res.body?.cancel().catch(() => {});
         throw new Error(`HTTP ${res.status}`);
       }
-      body = await readBody(
+      const body = await readBody(
         res,
         f.bytes,
         (n) => {
@@ -156,10 +162,15 @@ export async function ensureFiles(
         },
         signal,
       );
+      return { body, downloadMs: now() - t0 };
     } catch (e) {
       if (e instanceof ModelError) throw e;
       throw new ModelError("model_download_failed", `${f.name}: ${e?.message || e}`);
     }
+  };
+
+  // Checks length + SHA-256 and stores the file; runs concurrently with the next download.
+  const verifyAndStore = async (f, { body, downloadMs }) => {
     const t1 = now();
     if (body.length !== f.bytes || (await sha256Hex(body.out)) !== f.sha256) throw new ModelError("model_corrupt", f.name);
     const t2 = now();
@@ -169,21 +180,25 @@ export async function ensureFiles(
       await cache.delete(f.url).catch(() => {});
       throw new ModelError("model_download_failed", `cache write failed: ${e?.message || e}`);
     }
-    timings.push({ name: f.name, source: "network", bytes: body.length, downloadMs: t1 - t0, hashMs: t2 - t1, putMs: now() - t2 });
+    timings.push({ name: f.name, source: "network", bytes: body.length, downloadMs, hashMs: t2 - t1, putMs: now() - t2 });
     result.set(f.name, body.out.buffer);
   };
 
   let next = 0;
+  const pending = [];
   const worker = async () => {
     while (!firstError && next < missing.length) {
+      const f = missing[next++];
       try {
-        await download(missing[next++]);
+        const got = await download(f);
+        pending.push(verifyAndStore(f, got).catch(fail));
       } catch (e) {
         fail(e);
       }
     }
   };
   await Promise.all(Array.from({ length: Math.min(Math.max(1, streams), missing.length) }, worker));
+  await Promise.all(pending);
   if (firstError) throw firstError;
   onProgress(1, info());
   return new Map(files.map((f) => [f.name, result.get(f.name)]));
