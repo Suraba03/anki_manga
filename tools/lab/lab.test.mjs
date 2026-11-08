@@ -2,7 +2,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseLlmMode, cacheKey, createBudget, answerFor, userText, chatPayload, STUB } from "./llm.mjs";
-import { STEPS, mark, combine, diffRuns, renderMarkdown, regressed } from "./report.mjs";
+import { STEPS, mark, combine, diffRuns, renderMarkdown, regressed, profileLabel, stateOf, pickPrevious, updateLatest, stateWarning } from "./report.mjs";
+import { httpOrigins, mergeOrigins, originsToClear, clearTypes } from "./origins.mjs";
 
 test("--llm: stub by default, replay, live:N with a positive budget; anything else is an error", () => {
   assert.deepEqual(parseLlmMode(undefined), { mode: "stub" });
@@ -129,4 +130,102 @@ test("combine: all reached passed → ✓ (with a count when some were not reach
   assert.deepEqual(combine([{ ok: true }, { ok: false, note: "kanji without readings" }, { ok: false, note: "other" }]), { ok: false, note: "2/3: kanji without readings" });
   assert.deepEqual(combine([{ ok: null, note: "no kanji in the line" }, undefined]), { ok: null, note: "no kanji in the line" });
   assert.deepEqual(combine([]), { ok: null });
+});
+
+// ---- profile state and same-state comparison ------------------------------------------------------------
+
+test("profile state: labels, and runs without the field are unknown", () => {
+  assert.equal(profileLabel("fresh"), "fresh");
+  assert.equal(profileLabel("kept-reset"), "kept, site data reset");
+  assert.equal(profileLabel("unknown"), "unknown");
+  assert.equal(profileLabel(undefined), "unknown");
+  assert.equal(stateOf({ profile: { state: "fresh" } }), "fresh");
+  assert.equal(stateOf({ stamp: "old" }), "unknown");
+  assert.equal(stateOf(null), "unknown");
+});
+
+test("pickPrevious: the last run in the same state", () => {
+  const latest = { report: "/r/3.json", byState: { fresh: "/r/1.json", "kept-reset": "/r/3.json" } };
+  assert.deepEqual(pickPrevious(latest, "fresh"), { file: "/r/1.json", fallback: false });
+  assert.deepEqual(pickPrevious(latest, "kept-reset"), { file: "/r/3.json", fallback: false });
+});
+
+test("pickPrevious: no run in this state falls back to the latest of any state and says so", () => {
+  const latest = { report: "/r/2.json", byState: { fresh: "/r/2.json" } };
+  assert.deepEqual(pickPrevious(latest, "kept-reset"), { file: "/r/2.json", fallback: true });
+});
+
+test("pickPrevious: the old latest.json shape ({report}) is the fallback; nothing at all gives null", () => {
+  assert.deepEqual(pickPrevious({ report: "/r/old.json" }, "kept-reset"), { file: "/r/old.json", fallback: true });
+  assert.equal(pickPrevious(null, "fresh"), null);
+  assert.equal(pickPrevious({}, "fresh"), null);
+});
+
+test("pickPrevious: a same-state file that is gone is skipped for the latest one", () => {
+  const latest = { report: "/r/2.json", byState: { fresh: "/r/gone.json" } };
+  assert.deepEqual(pickPrevious(latest, "fresh", (f) => f !== "/r/gone.json"), { file: "/r/2.json", fallback: true });
+  assert.equal(pickPrevious(latest, "fresh", () => false), null);
+});
+
+test("updateLatest: remembers the report per state and keeps the other states", () => {
+  assert.deepEqual(updateLatest(null, "/r/1.json", "fresh"), { report: "/r/1.json", byState: { fresh: "/r/1.json" } });
+  assert.deepEqual(updateLatest({ report: "/r/1.json", byState: { fresh: "/r/1.json" } }, "/r/2.json", "kept-reset"),
+    { report: "/r/2.json", byState: { fresh: "/r/1.json", "kept-reset": "/r/2.json" } });
+  assert.deepEqual(updateLatest({ report: "/r/old.json" }, "/r/2.json", "kept-reset"), { report: "/r/2.json", byState: { "kept-reset": "/r/2.json" } });
+});
+
+test("stateWarning: only when the states differ", () => {
+  assert.equal(stateWarning("kept-reset", "kept-reset"), null);
+  assert.equal(stateWarning("kept-reset", "unknown"),
+    "Profile state differs: previous run unknown, this run kept, site data reset. Steps and timings may differ for that reason.");
+  assert.match(stateWarning("fresh", "kept-reset"), /previous run kept, site data reset, this run fresh/);
+});
+
+test("markdown: says which run it was compared with, and warns when the states differ", () => {
+  const cur = run([site("s1", { open: true })]);
+  const same = renderMarkdown(cur, [], { prevStamp: "2026-11-08T10-00-00", prevState: "kept-reset", state: "kept-reset" });
+  assert.match(same, /Compared with the run 2026-11-08T10-00-00 \(profile: kept, site data reset\)/);
+  assert.doesNotMatch(same, /Profile state differs/);
+  const other = renderMarkdown(cur, [], { prevStamp: "old", prevState: "unknown", state: "kept-reset" });
+  assert.match(other, /## Against the previous run\n\nProfile state differs: previous run unknown, this run kept, site data reset\./);
+  assert.match(other, /Compared with the run old \(profile: unknown\)/);
+});
+
+test("markdown: the profile state is a line of the run's facts", () => {
+  const cur = { ...run([site("s1", { open: true })]), meta: { profile: "kept, site data reset" } };
+  assert.match(renderMarkdown(cur, []), /- profile: kept, site data reset/);
+});
+
+// ---- the sites' origins -----------------------------------------------------------------------------------
+
+test("httpOrigins: http(s) origins only, deduped; extension, about: and junk are dropped", () => {
+  assert.deepEqual(httpOrigins(["https://a.example/x?y", "https://a.example/z", "http://b.example:8080/", "chrome-extension://abc/panel.html", "about:blank", "", null, "nonsense"]),
+    ["https://a.example", "http://b.example:8080"]);
+});
+
+test("mergeOrigins: per site, deduped, newest kept when over the cap; other sites stay", () => {
+  const saved = { "site-a": ["https://a.example"], "site-b": ["https://b.example"] };
+  assert.deepEqual(mergeOrigins(saved, "site-a", ["https://a.example", "https://cdn.a.example"]),
+    { "site-a": ["https://a.example", "https://cdn.a.example"], "site-b": ["https://b.example"] });
+  const many = Array.from({ length: 25 }, (_, i) => `https://h${i}.example`);
+  const capped = mergeOrigins({}, "site-a", many, 20);
+  assert.equal(capped["site-a"].length, 20);
+  assert.equal(capped["site-a"][19], "https://h24.example");
+  assert.deepEqual(mergeOrigins(null, "site-a", ["https://a.example"]), { "site-a": ["https://a.example"] });
+});
+
+test("originsToClear: the listed origin plus the recorded ones, http(s) only, never the extension's", () => {
+  const saved = { "site-a": ["https://cdn.a.example", "chrome-extension://abc", "https://a.example"], "site-b": ["https://b.example"] };
+  assert.deepEqual(originsToClear({ name: "site-a", url: "https://a.example/series/1" }, saved), ["https://a.example", "https://cdn.a.example"]);
+  assert.deepEqual(originsToClear({ name: "site-c", url: "https://c.example/" }, saved), ["https://c.example"]);
+  assert.deepEqual(originsToClear({ name: "site-c", url: "https://c.example/" }, null), ["https://c.example"]);
+});
+
+test("cleared storage types: site storage, not cookies (logins stay) unless the site asks with resetCookies", () => {
+  const plain = clearTypes({ name: "site-a" }).split(",");
+  for (const t of ["local_storage", "indexeddb", "cache_storage", "service_workers"]) assert.ok(plain.includes(t), t);
+  assert.ok(!plain.includes("cookies"));
+  assert.ok(!plain.includes("all"));
+  assert.ok(clearTypes({ name: "site-a", resetCookies: true }).split(",").includes("cookies"));
+  assert.ok(!clearTypes({ name: "site-a", resetCookies: false }).split(",").includes("cookies"));
 });
