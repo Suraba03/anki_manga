@@ -28,8 +28,8 @@ test("free-tier and no_text copy is exact", () => {
     text: "Today's free explanations are used up — they reset tomorrow. Add your own API key to keep going.",
     action: "own_key",
   });
-  assert.deepEqual(explainErrorMessage("free_monthly_cap"), {
-    text: "Free explanations are used up for this month. Add your own API key to keep going.",
+  assert.deepEqual(explainErrorMessage("free_monthly_cap", { now: new Date("2026-11-08T10:00:00Z") }), {
+    text: "The free service has used its budget for this month; it comes back on December 1. You can add your own API key in Settings.",
     action: "own_key",
   });
   assert.deepEqual(explainErrorMessage("free_unavailable"), {
@@ -183,6 +183,19 @@ test("waitForBubbleText gives up after the timeout with the pending reply, and s
   const other = await waitForBubbleText(async () => (n++, { ok: false, error: "unknown_bubble" }), { sleep: async () => {} });
   assert.deepEqual(other, { ok: false, error: "unknown_bubble" });
   assert.equal(n, 1);
+});
+
+test("the monthly-cap message names the 1st of next month in UTC, across year wrap and month ends", () => {
+  const on = (iso) => explainErrorMessage("free_monthly_cap", { now: new Date(iso) });
+  const back = (date) => `The free service has used its budget for this month; it comes back on ${date}. You can add your own API key in Settings.`;
+  assert.equal(on("2026-11-08T10:00:00Z").text, back("December 1"));
+  assert.equal(on("2026-12-15T10:00:00Z").text, back("January 1"));
+  // the last UTC evening of a month is still that month, even where the local date is already the next
+  assert.equal(on("2026-11-30T23:59:59Z").text, back("December 1"));
+  assert.equal(on("2026-12-31T23:30:00Z").text, back("January 1"));
+  assert.equal(on("2026-11-01T00:00:00Z").text, back("December 1"));
+  assert.equal(on("2026-11-08T10:00:00Z").action, "own_key");
+  assert.match(explainErrorMessage("free_monthly_cap").text, /it comes back on [A-Z][a-z]+ 1\./, "now defaults to the current time");
 });
 
 test("a card added just now reads as success; one already in the deck stays quiet", () => {
