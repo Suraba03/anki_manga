@@ -134,6 +134,12 @@ async function variant(chromePath, lazy) {
     await sw.evaluate(`chrome.storage.local.set({devModelBase: "http://127.0.0.1:${SERVE_PORT}/models/", settings: {perfMode: "prefetch"}})`);
     await sw.evaluate("chrome.sidePanel.open = async () => {}");
     await sw.evaluate(`handlers["am:enable-site"]({origin: ${JSON.stringify(READER)}}, {})`);
+    // A fresh profile is an install: the welcome tab, and an engine already downloading from the release URLs before the
+    // mirror was set. Close both, so the engine starts again from the mirror.
+    for (const t of (await (await fetch(`${base}/json/list`)).json()).filter((t) => t.type === "page" && t.url.endsWith("/welcome/welcome.html"))) {
+      await fetch(`${base}/json/close/${t.id}`).catch(() => {});
+    }
+    await sw.evaluate("chrome.offscreen.closeDocument().catch(() => {})");
     await sw.evaluate("ensureOffscreen()");
     const status = await waitFor(async () => {
       const st = await sw.evaluate('chrome.storage.session.get("modelStatus").then((r) => r.modelStatus || null)');
