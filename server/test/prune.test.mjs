@@ -271,3 +271,29 @@ test("a failing prune does not stop the alert check, and a failing alert check d
     e.mock.restore();
   }
 });
+
+test("a database without the newer tables still gets the older cleanups, and the missing ones count 0", { skip }, async () => {
+  const b = d1();
+  b.raw.exec("DROP TABLE spend_days; DROP TABLE alerts");
+  b.raw.prepare("INSERT INTO install_counts (day, id, n) VALUES ('2000-01-01', 'i', 1)").run();
+  b.raw.prepare("INSERT INTO spend (month, usd) VALUES ('2000-01', 1)").run();
+  b.raw.prepare("INSERT INTO cache (key, text, result, created_at, last_used) VALUES ('old', 't', '{}', 1, NULL)").run();
+  const e = mock.method(console, "error", () => {});
+  try {
+    const counts = await prune({ DB: b }, NOW);
+    assert.deepEqual(counts, { installCounts: 1, ipCounts: 0, spend: 1, cache: 1, spendDays: 0, alerts: 0 });
+    assert.deepEqual(keys(b, "cache", "key"), []);
+    const logged = e.mock.calls.map((c) => c.arguments.join(" ")).join("\n");
+    assert.match(logged, /spend_days/);
+    assert.match(logged, /alerts/);
+    assert.doesNotMatch(logged, /no such table/, "describeError logs names, not messages");
+  } finally {
+    e.mock.restore();
+  }
+});
+
+test("a failing older cleanup still stops prune (the cron logs it)", { skip }, async () => {
+  const b = d1();
+  b.raw.exec("DROP TABLE ip_counts");
+  await assert.rejects(prune({ DB: b }, NOW));
+});

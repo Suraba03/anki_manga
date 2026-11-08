@@ -117,6 +117,7 @@ function alertsDue({ month, day, total, dayTotal, cost, config }) {
 // send failed and was released). Not for the daily spike: that is a moment, not a state.
 // ctx: {db, config, now: Date, notify: function or null}
 export async function checkMonthAlerts({ db, config, now, notify }) {
+  if (!(config.MONTHLY_CAP_USD > 0)) return; // no budget to report on (every spend would be "100% of 0")
   const month = now.toISOString().slice(0, 7);
   const used = await db.getSpend(month);
   const due = MONTH_ALERTS.filter(([, fraction]) => used >= fraction * config.MONTHLY_CAP_USD).map(([kind]) => ({

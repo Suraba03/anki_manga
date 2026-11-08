@@ -2,6 +2,7 @@ import { test, mock, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { handleExplain, parseConfig, explanationKey, originAllowed, checkMonthAlerts } from "../src/explain.js";
+import { makeNotifier } from "../src/alerts.js";
 import { PROMPT_VERSION, SYSTEM_PROMPT } from "../../extension/lib/prompt.js";
 
 const ID = "3b241101-e2bb-4255-8caf-4136c566a962";
@@ -964,6 +965,37 @@ test("checkMonthAlerts without a notifier only claims and logs", async () => {
     await checkMonthAlerts({ db, config: CONFIG, now: NOW, notify: null });
     assert.equal(db.alerts.size, 2);
     assert.equal(w.mock.callCount(), 2);
+  } finally {
+    w.mock.restore();
+  }
+});
+
+test("checkMonthAlerts does nothing when the monthly cap is 0 or less", async () => {
+  const w = warns();
+  try {
+    for (const cap of [0, -1]) {
+      const db = memoryDb();
+      db.spend.set(MONTH, 5);
+      const sent = [];
+      await checkMonthAlerts({ db, config: { ...CONFIG, MONTHLY_CAP_USD: cap }, now: NOW, notify: async (t) => void sent.push(t) });
+      assert.deepEqual(sent, []);
+      assert.equal(db.alerts.size, 0);
+    }
+  } finally {
+    w.mock.restore();
+  }
+});
+
+test("a hung alert channel times out, the claim is released and the cron can retry", async () => {
+  const w = warns();
+  try {
+    const db = memoryDb();
+    db.spend.set(MONTH, 8.5);
+    const hang = (_u, init) => new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(init.signal.reason)));
+    const notify = makeNotifier({ TELEGRAM_BOT_TOKEN: "t", TELEGRAM_CHAT_ID: "1" }, { fetch: hang, timeoutMs: 20 });
+    await checkMonthAlerts({ db, config: CONFIG, now: NOW, notify });
+    assert.equal(db.alerts.size, 0);
+    assert.match(logs(errors), /alert failed/);
   } finally {
     w.mock.restore();
   }

@@ -70,3 +70,18 @@ test("the 100% text names the 1st of next month across a year end", () => {
 test("an unknown alert kind throws", () => {
   assert.throws(() => alertText("nope", {}));
 });
+
+// A fetch that never answers, and rejects when its signal aborts (like the real one).
+const hang = (_url, init) => new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(init.signal.reason ?? new Error("aborted"))));
+
+test("a hung Telegram call times out, so the caller can release its claim", async () => {
+  await assert.rejects(sendTelegram("x", { token: TOKEN, chatId: "1", fetch: hang, timeoutMs: 20 }));
+  const notify = makeNotifier({ TELEGRAM_BOT_TOKEN: TOKEN, TELEGRAM_CHAT_ID: "1" }, { fetch: hang, timeoutMs: 20 });
+  await assert.rejects(notify("x"));
+});
+
+test("sendTelegram sends an abort signal even without a timeoutMs option", async () => {
+  let signal;
+  await sendTelegram("x", { token: TOKEN, chatId: "1", fetch: async (_u, init) => ((signal = init.signal), OK()) });
+  assert.ok(signal instanceof AbortSignal);
+});
