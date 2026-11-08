@@ -10,6 +10,16 @@ Read Japanese manga in Chrome and turn speech bubbles into Anki cards with almos
 
 There is nothing else to install: no helper program, no Python, no Terminal. Text recognition (OCR) runs on your computer with [manga-ocr](https://github.com/kha-white/manga-ocr) and comic-text-detector, and **the extension never uploads page images**. Explanations use an online service (the project's free server, or your own provider with your key) and receive the text of a bubble you click, unless you set Explanations to **Off**; then no bubble text is sent.
 
+## What's new in 0.3.0
+
+- **Faster on long chapters.** The page on screen is read first: jump or scroll fast to a page and its bubbles show in about 2–3 s instead of 15+ s.
+- **Faster start.** The first download shows megabytes and time left, a welcome tab follows it, and after a browser restart the extension is ready in about a second.
+- **Works on more sites.** Images are loaded the way the page loads them, tall pages are read from screenshots, and thumbnails no longer get badges.
+- **Explanations can be turned off.** With Explanations set to **Off**, no bubble text is sent anywhere; furigana, the dictionary and cards keep working. **Delete saved key** removes your API key.
+- **You choose the Anki deck.** The extension never picks one for you, and the panel shows which deck "+" adds to.
+- **Clear messages** when an explanation isn't available for a line, and when the free service has used its monthly budget (with the date it comes back).
+- **A green "✓ added"** once a card is in Anki.
+
 ---
 
 ## Contents
@@ -42,9 +52,9 @@ There is nothing else to install: no helper program, no Python, no Terminal. Tex
 
 ## Install
 
-Install **Manga OCR & Mining for Anki** from the Chrome Web Store, then click the puzzle-piece icon in the toolbar and **pin** it so its icon is always visible.
+Install **Manga OCR & Mining for Anki** from the [Chrome Web Store](https://chromewebstore.google.com/detail/bgfnpifeeclmpfdcahphaiahgafjppeo), then click the puzzle-piece icon in the toolbar and **pin** it so its icon is always visible.
 
-> The Store listing is not published yet. Until then, load the extension from source (see [Development](#development)): download the repository, open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and choose the `extension` folder.
+> To run the latest code instead, load the extension from source (see [Development](#development)): download the repository, open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and choose the `extension` folder.
 
 ---
 
