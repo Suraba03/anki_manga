@@ -6,6 +6,7 @@
   "scripts": {
     "test": "node --test",
     "dev": "wrangler dev --var ALLOW_NO_ORIGIN:1",
+    "dev:alerts": "wrangler dev --var DEV_ROUTES:1",
     "deploy": "wrangler deploy"
   },
   "license": "GPL-3.0-or-later",

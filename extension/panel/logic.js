@@ -3,9 +3,16 @@
 const OWN_KEY = "own_key";
 const GENERIC = "Explanation failed — click the bubble again to retry.";
 
+// The free tier's budget resets on the 1st of the next month, UTC (the server's month is a UTC month).
+function monthlyCapText(now) {
+  const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+  const date = next.toLocaleDateString("en-US", { month: "long", day: "numeric", timeZone: "UTC" });
+  return `The free service has used its budget for this month; it comes back on ${date}. You can add your own API key in Settings.`;
+}
+
 const EXPLAIN_MESSAGES = {
   free_daily_limit: ["Today's free explanations are used up — they reset tomorrow. Add your own API key to keep going.", OWN_KEY],
-  free_monthly_cap: ["Free explanations are used up for this month. Add your own API key to keep going.", OWN_KEY],
+  free_monthly_cap: [monthlyCapText, OWN_KEY],
   free_unavailable: ["The free explanation service is unavailable right now. Try again later or add your own API key.", OWN_KEY],
   no_text: ["No text was recognized in this bubble.", null],
   no_api_key: ["Add your DeepSeek API key in Settings to get explanations.", null],
@@ -24,11 +31,12 @@ const EXPLAIN_MESSAGES = {
 const FREE_NOT_COUNTED = " It did not count toward your free limit.";
 
 // -> {text, action}: action "own_key" asks the panel to offer "Use my own API key". free: the free tier answered
-// (a refusal there says the free limit was not used).
-export function explainErrorMessage(code, { free = false } = {}) {
+// (a refusal there says the free limit was not used). now: only the monthly-cap message depends on it.
+export function explainErrorMessage(code, { free = false, now = new Date() } = {}) {
   const hit = Object.hasOwn(EXPLAIN_MESSAGES, code) && EXPLAIN_MESSAGES[code];
   if (!hit) return { text: `Something went wrong (${code}).`, action: null };
-  return { text: code === "refused" && free ? hit[0] + FREE_NOT_COUNTED : hit[0], action: hit[1] };
+  const text = typeof hit[0] === "function" ? hit[0](now) : hit[0];
+  return { text: code === "refused" && free ? text + FREE_NOT_COUNTED : text, action: hit[1] };
 }
 
 const MODEL_ERRORS = {

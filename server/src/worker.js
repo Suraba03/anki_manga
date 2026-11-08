@@ -1,7 +1,8 @@
 // Cloudflare Worker entry: CORS, D1 adapter, DeepSeek call. The request logic is in explain.js.
 import { buildMessages } from "../../extension/lib/prompt.js";
 import { prune } from "./prune.js";
-import { handleExplain, parseConfig, originAllowed, describeError } from "./explain.js";
+import { handleExplain, parseConfig, originAllowed, describeError, checkMonthAlerts } from "./explain.js";
+import { makeNotifier, alertText } from "./alerts.js";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/chat/completions";
 const LLM_TIMEOUT_MS = 30000;
@@ -47,7 +48,9 @@ export async function callDeepSeek(text, { apiKey, model = DEFAULT_MODEL, fetch:
   }
 }
 
-// d1: the Workers D1 binding. Counters are single UPSERT statements.
+// d1: the Workers D1 binding. Counters are single UPSERT statements. The spend adders return the new total from the
+// same statement (RETURNING), so exactly one request's charge interval (total - cost, total] contains an alert threshold,
+// even with concurrent requests.
 export function makeD1Db(d1, nowMs = Date.now) {
   const first = (sql, ...args) => d1.prepare(sql).bind(...args).first();
   const run = (sql, ...args) => d1.prepare(sql).bind(...args).run();
@@ -71,8 +74,15 @@ export function makeD1Db(d1, nowMs = Date.now) {
     incIp: (day, h) =>
       run("INSERT INTO ip_counts (day, h, n) VALUES (?, ?, 1) ON CONFLICT (day, h) DO UPDATE SET n = n + 1", day, h),
     getSpend: async (month) => (await first("SELECT usd FROM spend WHERE month = ?", month))?.usd ?? 0,
-    addSpend: (month, usd) =>
-      run("INSERT INTO spend (month, usd) VALUES (?, ?) ON CONFLICT (month) DO UPDATE SET usd = usd + excluded.usd", month, usd),
+    addSpend: async (month, usd) =>
+      (await first("INSERT INTO spend (month, usd) VALUES (?, ?) ON CONFLICT (month) DO UPDATE SET usd = usd + excluded.usd RETURNING usd", month, usd))?.usd ?? 0,
+    addDaySpend: async (day, usd) =>
+      (await first("INSERT INTO spend_days (day, usd) VALUES (?, ?) ON CONFLICT (day) DO UPDATE SET usd = usd + excluded.usd RETURNING usd", day, usd))?.usd ?? 0,
+    // true only for the call that inserted the row: that call sends the alert
+    claimAlert: async (period, kind, atMs) =>
+      (await run("INSERT OR IGNORE INTO alerts (period, kind, sent_at) VALUES (?, ?, ?)", period, kind, atMs))?.meta?.changes === 1,
+    // a failed send gives the claim back, so the cron can retry
+    releaseAlert: (period, kind) => run("DELETE FROM alerts WHERE period = ? AND kind = ?", period, kind),
   };
 }
 
@@ -91,8 +101,25 @@ function respond(status, json, origin, extra = {}) {
   return new Response(JSON.stringify(json), { status, headers });
 }
 
-// deps (tests): {db, callLlm, now}
+// Dev only (env.DEV_ROUTES = "1", never in wrangler.toml): the owner checks that alerts arrive.
+async function testAlert(env, deps) {
+  const notify = deps.notify !== undefined ? deps.notify : makeNotifier(env, { fetch: deps.alertFetch });
+  if (!notify) return respond(500, { error: "no_alert_channel" }, null);
+  try {
+    await notify(alertText("test", { at: deps.now ?? new Date() }));
+    return respond(200, { ok: true }, null);
+  } catch (e) {
+    console.error("free tier: alert failed:", describeError(e));
+    return respond(502, { error: "alert_failed" }, null);
+  }
+}
+
+// deps (tests): {db, callLlm, now, notify (function or null), waitUntil, alertFetch}
 export async function handle(request, env, deps = {}) {
+  // Before the Origin check, so plain curl works locally.
+  if (env.DEV_ROUTES === "1" && request.method === "POST" && new URL(request.url).pathname === "/dev/test-alert") {
+    return testAlert(env, deps);
+  }
   const origin = request.headers.get("Origin");
   let config;
   try {
@@ -138,6 +165,9 @@ export async function handle(request, env, deps = {}) {
       ipHash,
       origin,
       config,
+      // alert work runs after the response (ctx.waitUntil in production)
+      notify: deps.notify !== undefined ? deps.notify : makeNotifier(env, { fetch: deps.alertFetch }),
+      waitUntil: deps.waitUntil ?? ((p) => p),
     });
     return respond(status, json, cors, headers);
   } catch (e) {
@@ -146,10 +176,17 @@ export async function handle(request, env, deps = {}) {
   }
 }
 
+// Cron safety net: sends a monthly alert that was missed or whose send failed.
+async function checkAlerts(env) {
+  await checkMonthAlerts({ db: makeD1Db(env.DB), config: parseConfig(env), now: new Date(), notify: makeNotifier(env) });
+}
+
 export default {
-  fetch: (request, env) => handle(request, env),
-  // Daily cron (wrangler.toml [triggers]): retention cleanup.
+  fetch: (request, env, ctx) => handle(request, env, { waitUntil: (p) => ctx.waitUntil(p) }),
+  // Daily cron (wrangler.toml [triggers]): retention cleanup, then the alert check. Separate promises: one failing
+  // must not stop the other.
   scheduled: (_event, env, ctx) => {
     ctx.waitUntil(prune(env).catch((e) => console.error("free tier: prune failed:", describeError(e))));
+    ctx.waitUntil(checkAlerts(env).catch((e) => console.error("free tier: alert check failed:", describeError(e))));
   },
 };

@@ -1,7 +1,8 @@
 import { test, mock, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { handleExplain, parseConfig, explanationKey, originAllowed } from "../src/explain.js";
+import { handleExplain, parseConfig, explanationKey, originAllowed, checkMonthAlerts } from "../src/explain.js";
+import { makeNotifier } from "../src/alerts.js";
 import { PROMPT_VERSION, SYSTEM_PROMPT } from "../../extension/lib/prompt.js";
 
 const ID = "3b241101-e2bb-4255-8caf-4136c566a962";
@@ -16,6 +17,7 @@ const CONFIG = {
   DAILY_PER_IP: 300,
   DAILY_FAILED_PER_IP: 20,
   MONTHLY_CAP_USD: 10,
+  DAILY_ALERT_USD: 2.5,
   PRICE_IN_HIT: 0.000001,
   PRICE_IN_MISS: 0.00001,
   PRICE_OUT: 0.0001,
@@ -42,9 +44,13 @@ function memoryDb() {
   const installs = new Map();
   const ips = new Map();
   const spend = new Map();
+  const daySpend = new Map();
+  const alerts = new Map();
   const bump = (m, k) => m.set(k, (m.get(k) ?? 0) + 1);
+  // The adders return the new total, like the single-statement UPSERT ... RETURNING in worker.js.
+  const add = (m, k, usd) => (m.set(k, (m.get(k) ?? 0) + usd), m.get(k));
   return {
-    cache, installs, ips, spend,
+    cache, installs, ips, spend, daySpend, alerts,
     getCache: async (key) => cache.get(key)?.result ?? null,
     putCache: async (key, text, result) => void cache.set(key, { text, result }),
     countInstall: async (day, id) => installs.get(`${day}|${id}`) ?? 0,
@@ -52,13 +58,17 @@ function memoryDb() {
     countIp: async (day, h) => ips.get(`${day}|${h}`) ?? 0,
     incIp: async (day, h) => bump(ips, `${day}|${h}`),
     getSpend: async (month) => spend.get(month) ?? 0,
-    addSpend: async (month, usd) => void spend.set(month, (spend.get(month) ?? 0) + usd),
+    addSpend: async (month, usd) => add(spend, month, usd),
+    addDaySpend: async (day, usd) => add(daySpend, day, usd),
+    claimAlert: async (period, kind) => !alerts.has(`${period}|${kind}`) && (alerts.set(`${period}|${kind}`, true), true),
+    releaseAlert: async (period, kind) => void alerts.delete(`${period}|${kind}`),
   };
 }
 
 function setup(over = {}) {
   const db = memoryDb();
   const calls = [];
+  const pending = []; // promises handed to waitUntil: the alert work
   const ctx = {
     db,
     callLlm: async (text) => {
@@ -69,9 +79,11 @@ function setup(over = {}) {
     ipHash: "iphash",
     origin: ORIGIN,
     config: CONFIG,
+    notify: null,
+    waitUntil: (p) => pending.push(p),
     ...over,
   };
-  return { db, calls, ctx };
+  return { db, calls, pending, ctx };
 }
 
 const body = (over = {}) => ({ install_id: ID, text: "こんにちは", prompt_version: PROMPT_VERSION, ...over });
@@ -305,17 +317,21 @@ test("the wildcard chrome-extension://* does not match web origins", async () =>
   assert.equal((await handleExplain(body(), setup({ origin: "https://example.com" }).ctx)).status, 403);
 });
 
-test("crossing 80% of the monthly cap warns once; staying under or already over does not", async () => {
+test("crossing 80% of the monthly cap logs the alert once; staying under or already over does not", async () => {
   const warn = mock.method(console, "warn", () => {});
   try {
-    const { db, ctx } = setup();
+    const { db, ctx, pending } = setup();
     db.spend.set(MONTH, 7.99);
     await handleExplain(body({ text: "a" }), { ...ctx, config: { ...CONFIG, PRICE_OUT: 0.001 } }); // +0.03 -> 8.02
+    await Promise.all(pending);
     assert.equal(warn.mock.callCount(), 1);
+    assert.match(warn.mock.calls[0].arguments.join(" "), /80% of the monthly budget used \(8\.02 of 10 USD, 2026-11\)/);
     await handleExplain(body({ text: "b" }), { ...ctx, config: { ...CONFIG, PRICE_OUT: 0.001 } }); // already over
+    await Promise.all(pending);
     assert.equal(warn.mock.callCount(), 1);
     const fresh = setup();
     await handleExplain(body(), fresh.ctx);
+    await Promise.all(fresh.pending);
     assert.equal(warn.mock.callCount(), 1);
   } finally {
     warn.mock.restore();
@@ -391,27 +407,28 @@ test("a callLlm failure flagged as paid (HTTP 200, unreadable payload) is charge
   assert.equal(db.installs.size, 0);
 });
 
-test("a paid unparseable answer that crosses 80% of the cap still warns", async () => {
+test("a paid unparseable answer that crosses 80% of the cap still alerts", async () => {
   const warn = mock.method(console, "warn", () => {});
   try {
-    const { db, ctx } = setup({ callLlm: async () => ({ result: CUT, usage: USAGE, finishReason: "length" }) });
+    const { db, ctx, pending } = setup({ callLlm: async () => ({ result: CUT, usage: USAGE, finishReason: "length" }) });
     db.spend.set(MONTH, 7.99);
     await handleExplain(body(), { ...ctx, config: { ...CONFIG, PRICE_OUT: 0.001 } });
+    await Promise.all(pending);
     assert.equal(warn.mock.callCount(), 1);
   } finally {
     warn.mock.restore();
   }
 });
 
-test("after a paid call spend is written first, then cache, then the counters", async () => {
+test("after a paid call spend (month, then day) is written first, then cache, then the counters", async () => {
   const { db, ctx } = setup();
   const order = [];
-  for (const name of ["addSpend", "putCache", "incInstall", "incIp"]) {
+  for (const name of ["addSpend", "addDaySpend", "putCache", "incInstall", "incIp"]) {
     const f = db[name];
     db[name] = async (...a) => (order.push(name), f(...a));
   }
   await handleExplain(body(), ctx);
-  assert.deepEqual(order, ["addSpend", "putCache", "incInstall", "incIp"]);
+  assert.deepEqual(order, ["addSpend", "addDaySpend", "putCache", "incInstall", "incIp"]);
 });
 
 test("a putCache failure still leaves the spend recorded", async () => {
@@ -629,4 +646,357 @@ test("parseConfig: DAILY_FAILED_PER_IP is read like the other limits and default
   assert.equal(parseConfig(env).DAILY_FAILED_PER_IP, 20);
   assert.equal(parseConfig({ ...env, DAILY_FAILED_PER_IP: "5" }).DAILY_FAILED_PER_IP, 5);
   assert.throws(() => parseConfig({ ...env, DAILY_FAILED_PER_IP: "lots" }));
+});
+
+// ---- spend alerts ----
+// A paid call that costs exactly `usd`: PRICE_OUT 1 and no input tokens.
+const paying = (usd) => ({ callLlm: async () => ({ result: RAW, usage: { prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 0, completion_tokens: usd } }) });
+const ONE_USD_OUT = { ...CONFIG, PRICE_OUT: 1 };
+const alerting = (over = {}) => {
+  const sent = [];
+  const out = setup({ notify: async (t) => void sent.push(t), config: ONE_USD_OUT, ...over });
+  return { ...out, sent };
+};
+const logs = (m) => m.mock.calls.map((c) => c.arguments.join(" ")).join("\n");
+const warns = () => mock.method(console, "warn", () => {});
+
+test("parseConfig: DAILY_ALERT_USD defaults to a quarter of the monthly cap, can be set, and bad values throw", () => {
+  const env = {
+    DAILY_PER_INSTALL: "100", DAILY_PER_IP: "300", MONTHLY_CAP_USD: "10",
+    PRICE_IN_HIT: "6e-9", PRICE_IN_MISS: "3e-7", PRICE_OUT: "1.2e-6",
+  };
+  assert.equal(parseConfig(env).DAILY_ALERT_USD, 2.5);
+  assert.equal(parseConfig({ ...env, DAILY_ALERT_USD: "" }).DAILY_ALERT_USD, 2.5);
+  assert.equal(parseConfig({ ...env, MONTHLY_CAP_USD: "20" }).DAILY_ALERT_USD, 5);
+  assert.equal(parseConfig({ ...env, DAILY_ALERT_USD: "1.5" }).DAILY_ALERT_USD, 1.5);
+  assert.throws(() => parseConfig({ ...env, DAILY_ALERT_USD: "lots" }), /bad config var DAILY_ALERT_USD/);
+});
+
+test("an alert is sent once per threshold per month: sequential charges past 80%", async () => {
+  const w = warns();
+  try {
+    const { db, ctx, pending, sent } = alerting();
+    db.spend.set(MONTH, 7.5);
+    await handleExplain(body({ text: "a" }), { ...ctx, ...paying(0.4) }); // 7.9: nothing
+    await handleExplain(body({ text: "b" }), { ...ctx, ...paying(0.4) }); // 8.3: 80%
+    await handleExplain(body({ text: "c" }), { ...ctx, ...paying(0.4) }); // 8.7: already sent
+    await Promise.all(pending);
+    assert.deepEqual(sent, ["anki-manga free tier: 80% of the monthly budget used (8.3 of 10 USD, 2026-11)."]);
+  } finally {
+    w.mock.restore();
+  }
+});
+
+test("concurrent charges crossing 80% send one alert", async () => {
+  const w = warns();
+  try {
+    const { db, ctx, pending, sent } = alerting();
+    db.spend.set(MONTH, 7.5);
+    const rs = await Promise.all([
+      handleExplain(body({ text: "a" }), { ...ctx, ...paying(0.4) }),
+      handleExplain(body({ text: "b" }), { ...ctx, ...paying(0.4) }),
+      handleExplain(body({ text: "c" }), { ...ctx, ...paying(0.4) }),
+    ]);
+    await Promise.all(pending);
+    assert.deepEqual(rs.map((r) => r.status), [200, 200, 200]);
+    assert.equal(sent.length, 1);
+  } finally {
+    w.mock.restore();
+  }
+});
+
+test("one charge that crosses 80% and 100% sends both alerts, 80% first", async () => {
+  const w = warns();
+  try {
+    const { db, ctx, pending, sent } = alerting({ config: { ...ONE_USD_OUT, DAILY_ALERT_USD: 100 } });
+    db.spend.set(MONTH, 7.9);
+    await handleExplain(body(), { ...ctx, ...paying(2.5) });
+    await Promise.all(pending);
+    assert.equal(sent.length, 2);
+    assert.match(sent[0], /80% of the monthly budget used \(10\.4 of 10 USD, 2026-11\)/);
+    assert.match(sent[1], /100% of the monthly budget used .* off until 2026-12-01 \(UTC\)/);
+    // and neither again
+    await handleExplain(body({ text: "b" }), { ...ctx, config: { ...ONE_USD_OUT, MONTHLY_CAP_USD: 100, DAILY_ALERT_USD: 100 }, ...paying(0.1) });
+    await Promise.all(pending);
+    assert.equal(sent.length, 2);
+  } finally {
+    w.mock.restore();
+  }
+});
+
+test("the 100% alert fires when the charge that reaches the cap is the one after 80%", async () => {
+  const w = warns();
+  try {
+    const { db, ctx, pending, sent } = alerting({ config: { ...ONE_USD_OUT, DAILY_ALERT_USD: 100 } });
+    db.spend.set(MONTH, 8.5);
+    await handleExplain(body({ text: "a" }), { ...ctx, ...paying(1) }); // 9.5: nothing, 80% was passed earlier
+    await handleExplain(body({ text: "b" }), { ...ctx, ...paying(1) }); // 10.5
+    await Promise.all(pending);
+    assert.equal(sent.length, 1);
+    assert.match(sent[0], /^anki-manga free tier: 100%/);
+  } finally {
+    w.mock.restore();
+  }
+});
+
+test("the next month alerts again", async () => {
+  const w = warns();
+  try {
+    const { db, ctx, pending, sent } = alerting();
+    db.spend.set("2026-11", 7.9);
+    db.spend.set("2026-12", 7.9);
+    await handleExplain(body({ text: "a" }), { ...ctx, ...paying(0.5) });
+    await handleExplain(body({ text: "b" }), { ...ctx, now: new Date("2026-12-01T00:00:01Z"), ...paying(0.5) });
+    await Promise.all(pending);
+    assert.equal(sent.length, 2);
+    assert.match(sent[0], /2026-11/);
+    assert.match(sent[1], /2026-12/);
+  } finally {
+    w.mock.restore();
+  }
+});
+
+test("a daily spend spike alerts once a day, and again the next day", async () => {
+  const w = warns();
+  try {
+    const { ctx, pending, sent } = alerting();
+    await handleExplain(body({ text: "a" }), { ...ctx, ...paying(2.4) }); // below 2.5
+    await handleExplain(body({ text: "b" }), { ...ctx, ...paying(0.2) }); // 2.6: spike
+    await handleExplain(body({ text: "c" }), { ...ctx, ...paying(0.2) }); // already sent
+    await handleExplain(body({ text: "d" }), { ...ctx, now: new Date("2026-11-02T00:00:00Z"), ...paying(2.6) });
+    await Promise.all(pending);
+    assert.deepEqual(sent, [
+      "anki-manga free tier: unusual daily spend: 2.6 USD on 2026-11-01 (alert threshold 2.5 USD).",
+      "anki-manga free tier: unusual daily spend: 2.6 USD on 2026-11-02 (alert threshold 2.5 USD).",
+    ]);
+  } finally {
+    w.mock.restore();
+  }
+});
+
+test("the daily threshold is DAILY_ALERT_USD", async () => {
+  const w = warns();
+  try {
+    const { ctx, pending, sent } = alerting({ config: { ...ONE_USD_OUT, DAILY_ALERT_USD: 1 } });
+    await handleExplain(body({ text: "a" }), { ...ctx, ...paying(1.2) });
+    await Promise.all(pending);
+    assert.match(sent[0], /1\.2 USD on 2026-11-01 \(alert threshold 1 USD\)/);
+  } finally {
+    w.mock.restore();
+  }
+});
+
+test("a failing notify is logged without secrets, the claim is released, and the answer is unaffected", async () => {
+  const w = warns();
+  try {
+    const notify = async () => {
+      throw Object.assign(new Error("fetch failed: https://api.telegram.org/bot123:SECRET/sendMessage"), { status: 502 });
+    };
+    const { db, ctx, pending } = alerting({ notify });
+    db.spend.set(MONTH, 7.9);
+    const r = await handleExplain(body(), { ...ctx, ...paying(0.5) });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.json.result, PARSED);
+    await Promise.all(pending);
+    assert.equal(db.alerts.has(`${MONTH}|month_80`), false, "released so the cron can retry");
+    const logged = logs(errors);
+    assert.match(logged, /alert failed/);
+    assert.ok(!logged.includes("SECRET") && !logged.includes("telegram.org"), logged);
+  } finally {
+    w.mock.restore();
+  }
+});
+
+test("without a notifier the alert is claimed and logged, and nothing throws", async () => {
+  const w = warns();
+  try {
+    const { db, ctx, pending } = setup({ config: ONE_USD_OUT, notify: null });
+    db.spend.set(MONTH, 7.9);
+    const r = await handleExplain(body({ text: "SECRET-LINE" }), { ...ctx, ...paying(0.5) });
+    await Promise.all(pending);
+    assert.equal(r.status, 200);
+    assert.equal(db.alerts.has(`${MONTH}|month_80`), true);
+    assert.equal(w.mock.callCount(), 1);
+    const logged = logs(w);
+    assert.match(logged, /80% of the monthly budget used/);
+    assert.doesNotMatch(logged, /SECRET-LINE|iphash|3b241101/);
+  } finally {
+    w.mock.restore();
+  }
+});
+
+test("the alert work goes to waitUntil and the response does not wait for a slow notify", async () => {
+  const w = warns();
+  try {
+    let release;
+    const slow = new Promise((resolve) => (release = resolve));
+    const started = [];
+    const { db, ctx, pending } = alerting({ notify: async (t) => (started.push(t), slow) });
+    db.spend.set(MONTH, 7.9);
+    const r = await handleExplain(body(), { ...ctx, ...paying(0.5) });
+    assert.equal(r.status, 200);
+    assert.equal(pending.length, 1, "one promise for all the alert work");
+    let settled = false;
+    pending[0].then(() => (settled = true));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(started.length, 1);
+    assert.equal(settled, false, "still waiting for the notifier");
+    release();
+    await pending[0];
+    assert.equal(settled, true);
+  } finally {
+    w.mock.restore();
+  }
+});
+
+test("no alert work is scheduled when no threshold was crossed", async () => {
+  const { ctx, pending } = alerting();
+  await handleExplain(body(), { ...ctx, ...paying(0.1) });
+  assert.equal(pending.length, 0);
+});
+
+test("the alert promise never rejects, even when the bookkeeping fails", async () => {
+  const { db, ctx, pending, sent } = alerting();
+  db.spend.set(MONTH, 7.9);
+  db.claimAlert = async () => {
+    throw new Error("d1 down SECRET-SQL");
+  };
+  const r = await handleExplain(body(), { ...ctx, ...paying(0.5) });
+  assert.equal(r.status, 200);
+  await Promise.all(pending);
+  assert.equal(sent.length, 0);
+  assert.doesNotMatch(logs(errors), /SECRET-SQL/);
+});
+
+test("the spend is charged before any alert work starts", async () => {
+  const w = warns();
+  try {
+    const { db, ctx } = alerting();
+    db.spend.set(MONTH, 7.9);
+    const order = [];
+    for (const name of ["addSpend", "addDaySpend", "claimAlert"]) {
+      const f = db[name];
+      db[name] = async (...a) => (order.push(name), f(...a));
+    }
+    await handleExplain(body(), { ...ctx, ...paying(0.5) });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.deepEqual(order, ["addSpend", "addDaySpend", "claimAlert"]);
+  } finally {
+    w.mock.restore();
+  }
+});
+
+test("a failing daily-spend write does not fail the request or lose the monthly spend", async () => {
+  const { db, ctx } = alerting();
+  db.addDaySpend = async () => {
+    throw new Error("no such table: spend_days");
+  };
+  const r = await handleExplain(body(), { ...ctx, ...paying(0.5) });
+  assert.equal(r.status, 200);
+  assert.equal(await db.getSpend(MONTH), 0.5);
+  assert.match(logs(errors), /spend_days|daily spend/);
+});
+
+test("an LLM answer that is refused or unusable still charges and can alert", async () => {
+  const w = warns();
+  try {
+    const { db, ctx, pending, sent } = alerting({ config: { ...ONE_USD_OUT, DAILY_ALERT_USD: 100 } });
+    db.spend.set(MONTH, 7.9);
+    const r = await handleExplain(body(), { ...ctx, callLlm: async () => ({ result: "I can't help with that.", usage: { prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 0, completion_tokens: 0.5 }, finishReason: "stop" }) });
+    assert.equal(r.status, 422);
+    await Promise.all(pending);
+    assert.equal(sent.length, 1);
+  } finally {
+    w.mock.restore();
+  }
+});
+
+test("checkMonthAlerts sends the 80% and 100% alerts that were reached, and not the ones already claimed", async () => {
+  const w = warns();
+  try {
+    const db = memoryDb();
+    const sent = [];
+    const notify = async (t) => void sent.push(t);
+    const now = new Date("2026-11-20T03:17:00Z");
+
+    db.spend.set(MONTH, 5);
+    await checkMonthAlerts({ db, config: CONFIG, now, notify });
+    assert.deepEqual(sent, [], "under 80%");
+
+    db.spend.set(MONTH, 8.5);
+    await checkMonthAlerts({ db, config: CONFIG, now, notify });
+    assert.equal(sent.length, 1);
+    assert.match(sent[0], /80% .*\(8\.5 of 10 USD, 2026-11\)/);
+    await checkMonthAlerts({ db, config: CONFIG, now, notify });
+    assert.equal(sent.length, 1, "claimed: not sent again");
+
+    db.spend.set(MONTH, 10.2);
+    await checkMonthAlerts({ db, config: CONFIG, now, notify });
+    assert.equal(sent.length, 2);
+    assert.match(sent[1], /^anki-manga free tier: 100%/);
+  } finally {
+    w.mock.restore();
+  }
+});
+
+test("checkMonthAlerts re-sends an alert whose earlier send failed, and does not look at the daily spike", async () => {
+  const w = warns();
+  try {
+    const db = memoryDb();
+    const now = new Date("2026-11-20T03:17:00Z");
+    db.spend.set(MONTH, 8.5);
+    db.daySpend.set("2026-11-19", 99);
+    await checkMonthAlerts({ db, config: CONFIG, now, notify: async () => { throw Object.assign(new Error("x"), { status: 500 }); } });
+    assert.equal(db.alerts.size, 0, "released after the failed send");
+    const sent = [];
+    await checkMonthAlerts({ db, config: CONFIG, now, notify: async (t) => void sent.push(t) });
+    assert.equal(sent.length, 1);
+    assert.ok(!sent[0].includes("daily"));
+  } finally {
+    w.mock.restore();
+  }
+});
+
+test("checkMonthAlerts without a notifier only claims and logs", async () => {
+  const w = warns();
+  try {
+    const db = memoryDb();
+    db.spend.set(MONTH, 10.5);
+    await checkMonthAlerts({ db, config: CONFIG, now: NOW, notify: null });
+    assert.equal(db.alerts.size, 2);
+    assert.equal(w.mock.callCount(), 2);
+  } finally {
+    w.mock.restore();
+  }
+});
+
+test("checkMonthAlerts does nothing when the monthly cap is 0 or less", async () => {
+  const w = warns();
+  try {
+    for (const cap of [0, -1]) {
+      const db = memoryDb();
+      db.spend.set(MONTH, 5);
+      const sent = [];
+      await checkMonthAlerts({ db, config: { ...CONFIG, MONTHLY_CAP_USD: cap }, now: NOW, notify: async (t) => void sent.push(t) });
+      assert.deepEqual(sent, []);
+      assert.equal(db.alerts.size, 0);
+    }
+  } finally {
+    w.mock.restore();
+  }
+});
+
+test("a hung alert channel times out, the claim is released and the cron can retry", async () => {
+  const w = warns();
+  try {
+    const db = memoryDb();
+    db.spend.set(MONTH, 8.5);
+    const hang = (_u, init) => new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(init.signal.reason)));
+    const notify = makeNotifier({ TELEGRAM_BOT_TOKEN: "t", TELEGRAM_CHAT_ID: "1" }, { fetch: hang, timeoutMs: 20 });
+    await checkMonthAlerts({ db, config: CONFIG, now: NOW, notify });
+    assert.equal(db.alerts.size, 0);
+    assert.match(logs(errors), /alert failed/);
+  } finally {
+    w.mock.restore();
+  }
 });

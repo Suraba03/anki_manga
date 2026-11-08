@@ -1,12 +1,15 @@
 // Pure request logic of the free tier: validation, quotas, spend cap, shared cache.
 // No I/O of its own: the db, the LLM call, the clock and the IP hash are passed in.
 import { PROMPT_VERSION, SYSTEM_PROMPT, parseExplanation, isRefusal } from "../../extension/lib/prompt.js";
+import { alertText } from "./alerts.js";
 
 export const MAX_TEXT_CHARS = 300;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const NUMBER_VARS = ["DAILY_PER_INSTALL", "DAILY_PER_IP", "MONTHLY_CAP_USD", "PRICE_IN_HIT", "PRICE_IN_MISS", "PRICE_OUT"];
 const DEFAULT_FAILED_PER_IP = 20;
-const WARN_FRACTION = 0.8;
+const DEFAULT_DAILY_ALERT_FRACTION = 0.25; // of the monthly cap: about 7x a normal day at the cap
+// Monthly alerts: [kind, fraction of MONTHLY_CAP_USD]. Order matters: 80% is sent before 100%.
+const MONTH_ALERTS = [["month_80", 0.8], ["month_100", 1]];
 const MAX_OUTPUT_TOKENS = 700; // the max_tokens worker.js sends
 
 // Wrangler vars are strings.
@@ -22,6 +25,10 @@ export function parseConfig(env) {
   const failed = env.DAILY_FAILED_PER_IP === undefined || env.DAILY_FAILED_PER_IP === "" ? DEFAULT_FAILED_PER_IP : Number(env.DAILY_FAILED_PER_IP);
   if (!Number.isFinite(failed)) throw new Error("bad config var DAILY_FAILED_PER_IP");
   config.DAILY_FAILED_PER_IP = failed;
+  // DAILY_ALERT_USD: one day's spend above this alerts the owner (abuse). Optional.
+  const dailyAlert = env.DAILY_ALERT_USD === undefined || env.DAILY_ALERT_USD === "" ? DEFAULT_DAILY_ALERT_FRACTION * config.MONTHLY_CAP_USD : Number(env.DAILY_ALERT_USD);
+  if (!Number.isFinite(dailyAlert)) throw new Error("bad config var DAILY_ALERT_USD");
+  config.DAILY_ALERT_USD = dailyAlert;
   return config;
 }
 
@@ -65,13 +72,70 @@ function costOf(usage, text, config) {
   return input + out * config.PRICE_OUT;
 }
 
+// ---- spend alerts ----
+// Claim the (period, kind) row first: only the call that inserted it sends, so an alert goes out once per period
+// even with concurrent requests and the cron. A failed send releases the claim so the cron can retry.
+// Never throws: alerts must not break the request that triggered them.
+async function fireAlert(db, notify, { period, kind, text }, nowMs) {
+  try {
+    if (!(await db.claimAlert(period, kind, nowMs))) return;
+    console.warn(text); // amounts and dates only
+    if (!notify) return; // no channel configured: the log line is all there is
+    try {
+      await notify(text);
+    } catch (e) {
+      console.error("free tier: alert failed:", describeError(e));
+      await db.releaseAlert(period, kind);
+    }
+  } catch (e) {
+    console.error("free tier: alert bookkeeping failed:", describeError(e));
+  }
+}
+
+const fireAlerts = async (db, notify, alerts, nowMs) => {
+  for (const alert of alerts) await fireAlert(db, notify, alert, nowMs);
+};
+
+// An interval (total - cost, total] holds the threshold: exactly one of the charges that add up past it sees this.
+const crossed = (total, cost, threshold) => total - cost < threshold && threshold <= total;
+
+// The alerts one charge of `cost` triggers. dayTotal: null when the daily total could not be written.
+function alertsDue({ month, day, total, dayTotal, cost, config }) {
+  const alerts = [];
+  for (const [kind, fraction] of MONTH_ALERTS) {
+    if (crossed(total, cost, fraction * config.MONTHLY_CAP_USD)) {
+      alerts.push({ period: month, kind, text: alertText(kind, { used: total, cap: config.MONTHLY_CAP_USD, month }) });
+    }
+  }
+  if (dayTotal !== null && crossed(dayTotal, cost, config.DAILY_ALERT_USD)) {
+    alerts.push({ period: day, kind: "day_spike", text: alertText("day_spike", { usd: dayTotal, day, threshold: config.DAILY_ALERT_USD }) });
+  }
+  return alerts;
+}
+
+// Cron safety net: the monthly alerts whose threshold is already reached and that were never claimed (or whose
+// send failed and was released). Not for the daily spike: that is a moment, not a state.
+// ctx: {db, config, now: Date, notify: function or null}
+export async function checkMonthAlerts({ db, config, now, notify }) {
+  if (!(config.MONTHLY_CAP_USD > 0)) return; // no budget to report on (every spend would be "100% of 0")
+  const month = now.toISOString().slice(0, 7);
+  const used = await db.getSpend(month);
+  const due = MONTH_ALERTS.filter(([, fraction]) => used >= fraction * config.MONTHLY_CAP_USD).map(([kind]) => ({
+    period: month,
+    kind,
+    text: alertText(kind, { used, cap: config.MONTHLY_CAP_USD, month }),
+  }));
+  await fireAlerts(db, notify, due, now.getTime());
+}
+
 const reply = (status, json, headers = {}) => ({ status, json, headers });
 const err = (status, error) => reply(status, { error });
 const remainingHeader = (limit, used) => ({ "X-Free-Remaining": String(Math.max(0, limit - used)) });
 
-// body: the parsed JSON. ctx: {db, callLlm(text) -> {result, usage}, now: Date, ipHash, origin, config}
+// body: the parsed JSON. ctx: {db, callLlm(text) -> {result, usage}, now: Date, ipHash, origin, config,
+// notify: async (text) or null (no alert channel), waitUntil(promise): keeps alert work alive after the response}
 // -> {status, json, headers}
-export async function handleExplain(body, { db, callLlm, now, ipHash, origin, config }) {
+export async function handleExplain(body, { db, callLlm, now, ipHash, origin, config, notify = null, waitUntil = (p) => p }) {
   if (!originAllowed(origin, config)) return err(403, "forbidden_origin");
   if (body === null || typeof body !== "object" || Array.isArray(body) || body.prompt_version !== PROMPT_VERSION) {
     return err(400, "bad_request");
@@ -109,11 +173,17 @@ export async function handleExplain(body, { db, callLlm, now, ipHash, origin, co
   // transaction here, so two concurrent requests can both pass the checks above (a small, accepted overshoot).
   const charge = async (usage) => {
     const cost = costOf(usage, text, config);
-    await db.addSpend(month, cost);
-    const warnAt = config.MONTHLY_CAP_USD * WARN_FRACTION;
-    if (spentBefore < warnAt && spentBefore + cost >= warnAt) {
-      console.warn(`free tier: monthly spend ${(spentBefore + cost).toFixed(4)} USD passed 80% of the ${config.MONTHLY_CAP_USD} USD cap`);
+    const total = await db.addSpend(month, cost);
+    // The daily total only feeds the spike alert: if it fails (say, the table is not migrated yet), the request goes on.
+    let dayTotal = null;
+    try {
+      dayTotal = await db.addDaySpend(day, cost);
+    } catch (e) {
+      console.error("free tier: daily spend write failed:", describeError(e));
     }
+    // After the money is recorded; not awaited, so a slow or broken alert channel never delays the answer.
+    const alerts = alertsDue({ month, day, total, dayTotal, cost, config });
+    if (alerts.length > 0) waitUntil(fireAlerts(db, notify, alerts, now.getTime()));
   };
 
   let out;
