@@ -1,0 +1,50 @@
+# Deploys the free-tier Worker (server/) by hand: Actions > deploy-worker > Run workflow, from master.
+# The `production` environment has the owner as required reviewer, so nothing deploys without his approval.
+# It only uploads the Worker code and the [vars] in wrangler.toml. It never touches Worker secrets or D1
+# (no schema, no migrations): those stay manual.
+name: deploy-worker
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-worker
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: deploy
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    env:
+      WRANGLER_SEND_METRICS: "false"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.13.0"
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Server unit tests
+        working-directory: server
+        run: node --test
+
+      - name: Install wrangler
+        working-directory: server
+        run: npm ci --no-audit --no-fund
+
+      - name: Deploy the Worker
+        working-directory: server
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler deploy

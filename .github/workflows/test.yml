@@ -1,0 +1,79 @@
+# Unit tests on every PR and on master. No secrets, no network beyond npm. Model and e2e tests skip (no samples,
+# no tools/.cache, no Chrome), and say so in the log, as they do locally.
+# The job name `tests` is the required check for master; keep it stable.
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_call: # release.yml runs the same tests before it builds the zip
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  tests:
+    name: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      WRANGLER_SEND_METRICS: "false"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # for the server/ diff below
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.13.0"
+          cache: npm
+          cache-dependency-path: |
+            extension/package-lock.json
+            server/package-lock.json
+
+      - name: Extension unit tests
+        working-directory: extension
+        run: |
+          npm ci --no-audit --no-fund
+          node --test
+
+      - name: Server unit tests
+        working-directory: server
+        run: node --test
+
+      - name: Lab unit tests (pure parts, no tools/.cache)
+        run: node --test tools/lab/lab.test.mjs
+
+      - name: Package the Store zip (smoke)
+        run: node tools/package.mjs --out "$RUNNER_TEMP/dist"
+
+      - name: Did server/ change?
+        id: server
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then base="$PR_BASE"; else base="$PUSH_BEFORE"; fi
+          # A new branch or tag (before = zeros), a missing base or a workflow_call from a tag: check it anyway.
+          if [ -z "$base" ] || [ "$base" = 0000000000000000000000000000000000000000 ] \
+            || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          elif git diff --quiet "$base" HEAD -- server/; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Worker build check (wrangler deploy --dry-run, no token)
+        if: steps.server.outputs.changed == 'true'
+        working-directory: server
+        run: |
+          npm ci --no-audit --no-fund
+          npx wrangler deploy --dry-run --outdir "$RUNNER_TEMP/worker"
