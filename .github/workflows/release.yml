@@ -1,0 +1,80 @@
+# On a pushed tag vX.Y.Z: check it matches extension/manifest.json, run the tests, build the Store zip and attach it
+# to a DRAFT release. The owner reviews and publishes it.
+# The release `models-1` holds the models and the dictionary the extension downloads (pinned by tag in
+# extension/engine/models.manifest.json). This workflow never touches it, and a new release is never marked Latest.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Tag matches the manifest version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(node -p 'require("./extension/manifest.json").version')
+          if ! printf '%s\n' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Tag $TAG is not vX.Y.Z"; exit 1
+          fi
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::Tag $TAG does not match extension/manifest.json version $version"; exit 1
+          fi
+
+  tests:
+    needs: version
+    uses: ./.github/workflows/test.yml
+
+  release:
+    name: draft release
+    needs: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # create the draft release and upload the zip
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.13.0"
+
+      - name: Build the Store zip
+        run: node tools/package.mjs --out "$RUNNER_TEMP/dist"
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          zip="$RUNNER_TEMP/dist/manga-mining-$version.zip"
+          test -f "$zip"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "::error::A release for $TAG already exists; delete the draft first to rebuild it"; exit 1
+          fi
+          gh release create "$TAG" "$zip" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --draft \
+            --latest=false \
+            --title "Manga Mining $version" \
+            --notes "Chrome Web Store zip for $version, built by CI from $GITHUB_SHA. Write the notes before publishing."
