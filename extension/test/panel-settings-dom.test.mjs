@@ -13,6 +13,9 @@ class FakeEl {
   async click() {
     await Promise.all((this.listeners.click || []).map((fn) => fn({ target: this })));
   }
+  async fire(type) {
+    await Promise.all((this.listeners[type] || []).map((fn) => fn({ target: this })));
+  }
   async change() {
     await Promise.all((this.listeners.change || []).map((fn) => fn({ target: this })));
   }
@@ -151,11 +154,27 @@ test("a saved deck Anki lacks is named once; the saved entry is kept; later look
   resetWorld({ local: { decks: { "https://manga.test": "Old", _last: "Old" } } });
   bindStorage();
   const { mod } = await load();
+  els["settings"].open = true; // the drawer is open: the user can see the line
   await mod.loadDecks();
   assert.equal(els["deck-state"].textContent, "“Old” is no longer in Anki. Cards will go to “manga mining” once you confirm it.");
   await mod.loadDecks(); // a tab change
   assert.equal(els["deck-state"].textContent, "Cards will go to “manga mining” once you confirm it.", "said once");
   assert.deepEqual(decksSaved(), { "https://manga.test": "Old", _last: "Old" }, "never deleted from storage");
+});
+
+test("a missing deck is not used up while Settings is closed: the note is there when it opens, then quiet", async () => {
+  resetWorld({ local: { decks: { "https://manga.test": "Old", _last: "Old" } } });
+  bindStorage();
+  const { mod } = await load();
+  await mod.initSettings();
+  const note = "“Old” is no longer in Anki. Cards will go to “manga mining” once you confirm it.";
+  await mod.loadDecks(); // the panel opens with Settings closed
+  await mod.loadDecks(); // a tab change
+  assert.equal(els["deck-state"].textContent, note, "still there for when the drawer opens");
+  els["settings"].open = true;
+  await els["settings"].fire("toggle"); // the user opens Settings and reads it
+  await mod.loadDecks(); // the next tab change
+  assert.equal(els["deck-state"].textContent, "Cards will go to “manga mining” once you confirm it.");
 });
 
 test("picking a deck saves it for the site and as the last one, and the new line is shown", async () => {

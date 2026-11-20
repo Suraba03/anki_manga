@@ -128,14 +128,15 @@ export function deckStateText(choice, deck, gone) {
 
 // "No longer in Anki" is news once: the deck stays saved (Anki may be on another profile), so every look at Anki's list
 // would repeat it. said: Map origin -> the missing deck already announced (the panel keeps one while it is open).
+// seen: whether the user can see the line now (the Settings drawer is open); a note nobody saw is not used up.
 // -> the deck to name now | null. A fixed entry (nothing missing) is forgotten, so a later loss is announced again.
-export function announceGone(said, origin, missing) {
+export function announceGone(said, origin, missing, seen = true) {
   if (!missing) {
     said.delete(origin);
     return null;
   }
   if (said.get(origin) === missing) return null;
-  said.set(origin, missing);
+  if (seen) said.set(origin, missing);
   return missing;
 }
 

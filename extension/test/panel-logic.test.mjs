@@ -384,3 +384,12 @@ test("announceGone: a missing deck is announced once per site, until it is fixed
   assert.equal(announceGone(said, null, "Old"), "Old", "no origin (a chrome:// page) still works");
   assert.equal(announceGone(said, null, "Old"), null);
 });
+
+test("announceGone: a note nobody could see (Settings closed) is shown but not used up", () => {
+  const said = new Map();
+  assert.equal(announceGone(said, "https://a.test", "Old", false), "Old");
+  assert.equal(announceGone(said, "https://a.test", "Old", false), "Old", "still news the next time");
+  assert.equal(announceGone(said, "https://a.test", "Old", true), "Old", "seen now");
+  assert.equal(announceGone(said, "https://a.test", "Old", false), null, "and not repeated after that");
+  assert.equal(announceGone(said, "https://a.test", null, false), null);
+});

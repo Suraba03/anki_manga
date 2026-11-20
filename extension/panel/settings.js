@@ -42,6 +42,7 @@ export const DECK_CHANGED = "am:deck-changed";
 
 const nextDeckLoad = latestCall();
 const goneSaid = new Map(); // site -> the missing deck already announced ("no longer in Anki" is said once)
+let lastMissing = null; // the missing deck the last look at Anki found: opening Settings is what makes it "seen"
 let announcedDeck = null; // the deck the entries on screen were last told about (not state.deckChecked, which chooseDeck sets early)
 
 // userAction: true from the "Connect to Anki" button; events (tab changes) never re-ask after a denial.
@@ -64,7 +65,8 @@ export async function loadDecks({ userAction = false } = {}) {
     $("deck-use").hidden = choice.offer !== "use";
     if (choice.offer === "use") $("deck-use").textContent = `Use “${choice.selected}”`;
     $("deck-create").hidden = choice.offer !== "create";
-    $("deck-state").textContent = deckStateText(choice, deck, announceGone(goneSaid, state.origin, missing));
+    $("deck-state").textContent = deckStateText(choice, deck, announceGone(goneSaid, state.origin, missing, $("settings").open));
+    lastMissing = missing;
     await showDeckTarget();
     if (isCurrent() && deckChanged(announcedDeck, deck)) {
       announcedDeck = deck;
@@ -165,6 +167,10 @@ export async function openOwnKey() {
 export async function initSettings() {
   $("deck").addEventListener("change", () => {
     if ($("deck").value) chooseDeck($("deck").value);
+  });
+  // The deck line lives in the drawer: a note shown while it was closed counts as said once the user opens it.
+  $("settings").addEventListener("toggle", () => {
+    if ($("settings").open) announceGone(goneSaid, state.origin, lastMissing);
   });
   $("deck-use").addEventListener("click", () => chooseDeck(DEFAULT_DECK));
   $("deck-create").addEventListener("click", async () => {
