@@ -10,9 +10,10 @@ DAILY_PER_IP = "300"
 # 0 or an empty value makes the Worker answer 500 server_misconfigured and log which variable is wrong. IPv6 callers
 # are counted per /64.
 DAILY_FAILED_PER_IP = "20"
-MONTHLY_CAP_USD = "10"
+MONTHLY_CAP_USD = "50"
 # One UTC day's spend above this (USD) alerts the owner once (abuse or a bug). Optional: without it, a quarter of the
-# monthly cap. 2.5 is about 7x a normal day at the cap.
+# monthly cap. Kept at 2.5 when the cap went from 10 to 50 USD (a day at the cap is about 1.7), so it also fires on real
+# growth, not only on abuse.
 DAILY_ALERT_USD = "2.5"
 # USD per token, DeepSeek Flash at PEAK rates (the dearer ones, so the cap errs on the safe side).
 # Source: https://api-docs.deepseek.com/quick_start/pricing (checked 2026-11-01), per 1M tokens:
