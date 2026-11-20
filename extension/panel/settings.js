@@ -1,6 +1,6 @@
 // The settings drawer: deck, explanation source (free / own key / off), text-recognition mode, delete data.
 import { getSettings, setSettings } from "../lib/settings.js";
-import { freeLeftText, ankiErrorMessage, ownKeyCheck, llmModeAfter, explanationsHint, deleteKeyOutcome, validateBaseUrl, resolveDeck, deckChoice, deckForCard, deckTargetText, latestCall, deckChanged, DEFAULT_DECK } from "./logic.js";
+import { freeLeftText, ankiErrorMessage, ownKeyCheck, llmModeAfter, explanationsHint, deleteKeyOutcome, validateBaseUrl, resolveDeck, deckChoice, deckForCard, deckTargetText, latestCall, deckChanged, deckStateText, announceGone, DEFAULT_DECK } from "./logic.js";
 import { deckNames, createDeck, forgetKnown } from "./anki.js";
 import { engine } from "./engine.js";
 import { state } from "./state.js";
@@ -41,6 +41,7 @@ async function chooseDeck(deck) {
 export const DECK_CHANGED = "am:deck-changed";
 
 const nextDeckLoad = latestCall();
+const goneSaid = new Map(); // site -> the missing deck already announced ("no longer in Anki" is said once)
 let announcedDeck = null; // the deck the entries on screen were last told about (not state.deckChecked, which chooseDeck sets early)
 
 // userAction: true from the "Connect to Anki" button; events (tab changes) never re-ask after a denial.
@@ -63,12 +64,7 @@ export async function loadDecks({ userAction = false } = {}) {
     $("deck-use").hidden = choice.offer !== "use";
     if (choice.offer === "use") $("deck-use").textContent = `Use “${choice.selected}”`;
     $("deck-create").hidden = choice.offer !== "create";
-    const gone = missing ? `“${missing}” is no longer in Anki. ` : "";
-    $("deck-state").textContent =
-      choice.offer === "use" ? `${gone}Cards will go to “${DEFAULT_DECK}” once you confirm it.`
-      : choice.offer === "create" ? `${gone}Choose a deck for your cards, or create “${DEFAULT_DECK}”.`
-      : gone ? `${gone}Cards go to “${deck}”.`
-      : "";
+    $("deck-state").textContent = deckStateText(choice, deck, announceGone(goneSaid, state.origin, missing));
     await showDeckTarget();
     if (isCurrent() && deckChanged(announcedDeck, deck)) {
       announcedDeck = deck;

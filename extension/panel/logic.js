@@ -118,6 +118,27 @@ export function deckChoice(names, deck) {
   return { selected: null, offer: "create" };
 }
 
+// The line under the deck picker. gone: a saved deck Anki lacks, to name in this message (null: none, or already said).
+export function deckStateText(choice, deck, gone) {
+  const lost = gone ? `“${gone}” is no longer in Anki. ` : "";
+  if (choice.offer === "use") return `${lost}Cards will go to “${DEFAULT_DECK}” once you confirm it.`;
+  if (choice.offer === "create") return `${lost}Choose a deck for your cards, or create “${DEFAULT_DECK}”.`;
+  return lost ? `${lost}Cards go to “${deck}”.` : "";
+}
+
+// "No longer in Anki" is news once: the deck stays saved (Anki may be on another profile), so every look at Anki's list
+// would repeat it. said: Map origin -> the missing deck already announced (the panel keeps one while it is open).
+// -> the deck to name now | null. A fixed entry (nothing missing) is forgotten, so a later loss is announced again.
+export function announceGone(said, origin, missing) {
+  if (!missing) {
+    said.delete(origin);
+    return null;
+  }
+  if (said.get(origin) === missing) return null;
+  said.set(origin, missing);
+  return missing;
+}
+
 // The deck a "+" sends to. checked: {origin, deck} from the last successful look at Anki's deck list (null before
 // one): for this site it decides, so a deck Anki lacked is never used. Without one (Anki unreachable so far),
 // the saved decks are read as they are.

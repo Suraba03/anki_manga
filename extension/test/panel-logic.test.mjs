@@ -21,6 +21,8 @@ import {
   deckForCard,
   latestCall,
   deckChanged,
+  deckStateText,
+  announceGone,
   deckTargetText,
   DEFAULT_DECK,
   NO_DECK,
@@ -356,4 +358,29 @@ test("deck: the line by the cards names the target deck, or says to pick one", (
   assert.equal(deckTargetText("manga mining"), "Cards go to → manga mining");
   assert.equal(deckTargetText(null), NO_DECK);
   assert.equal(NO_DECK, "Pick an Anki deck in Settings first.");
+});
+
+test("deckStateText: what the deck line in Settings says for each offer, with the missing deck named only when asked", () => {
+  const use = { selected: DEFAULT_DECK, offer: "use" };
+  const create = { selected: null, offer: "create" };
+  const fine = { selected: "Core", offer: null };
+  assert.equal(deckStateText(use, null, null), "Cards will go to “manga mining” once you confirm it.");
+  assert.equal(deckStateText(use, null, "Old"), "“Old” is no longer in Anki. Cards will go to “manga mining” once you confirm it.");
+  assert.equal(deckStateText(create, null, null), "Choose a deck for your cards, or create “manga mining”.");
+  assert.equal(deckStateText(create, null, "Old"), "“Old” is no longer in Anki. Choose a deck for your cards, or create “manga mining”.");
+  assert.equal(deckStateText(fine, "Core", null), "");
+  assert.equal(deckStateText(fine, "Core", "Old"), "“Old” is no longer in Anki. Cards go to “Core”.");
+});
+
+test("announceGone: a missing deck is announced once per site, until it is fixed", () => {
+  const said = new Map();
+  assert.equal(announceGone(said, "https://a.test", null), null, "nothing missing");
+  assert.equal(announceGone(said, "https://a.test", "Old"), "Old", "first time");
+  assert.equal(announceGone(said, "https://a.test", "Old"), null, "the same one again (every tab change)");
+  assert.equal(announceGone(said, "https://b.test", "Old"), "Old", "another site has its own entry");
+  assert.equal(announceGone(said, "https://a.test", "Other"), "Other", "a different missing deck is news");
+  assert.equal(announceGone(said, "https://a.test", null), null, "fixed");
+  assert.equal(announceGone(said, "https://a.test", "Other"), "Other", "missing again after a fix: say so again");
+  assert.equal(announceGone(said, null, "Old"), "Old", "no origin (a chrome:// page) still works");
+  assert.equal(announceGone(said, null, "Old"), null);
 });
