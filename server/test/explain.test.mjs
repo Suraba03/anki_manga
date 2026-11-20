@@ -21,7 +21,7 @@ const CONFIG = {
   PRICE_IN_HIT: 0.000001,
   PRICE_IN_MISS: 0.00001,
   PRICE_OUT: 0.0001,
-  ALLOWED_ORIGINS: "chrome-extension://*",
+  ALLOWED_ORIGINS: ORIGIN,
   ALLOW_NO_ORIGIN: "0",
 };
 
@@ -313,8 +313,9 @@ test("ALLOWED_ORIGINS takes a comma-separated list of exact origins", async () =
   assert.equal((await handleExplain(body(), setup({ config, origin: "https://chrome-extension://aaa" }).ctx)).status, 403);
 });
 
-test("the wildcard chrome-extension://* does not match web origins", async () => {
+test("a web origin and another extension are 403", async () => {
   assert.equal((await handleExplain(body(), setup({ origin: "https://example.com" }).ctx)).status, 403);
+  assert.equal((await handleExplain(body(), setup({ origin: "chrome-extension://someoneelse" }).ctx)).status, 403);
 });
 
 test("crossing 80% of the monthly cap logs the alert once; staying under or already over does not", async () => {
@@ -342,7 +343,7 @@ test("parseConfig reads string vars into numbers", () => {
   const c = parseConfig({
     DAILY_PER_INSTALL: "100", DAILY_PER_IP: "300", MONTHLY_CAP_USD: "10",
     PRICE_IN_HIT: "6e-9", PRICE_IN_MISS: "3e-7", PRICE_OUT: "1.2e-6",
-    ALLOWED_ORIGINS: "chrome-extension://*", ALLOW_NO_ORIGIN: "0",
+    ALLOWED_ORIGINS: ORIGIN, ALLOW_NO_ORIGIN: "0",
   });
   assert.equal(c.DAILY_PER_INSTALL, 100);
   assert.equal(c.MONTHLY_CAP_USD, 10);
@@ -352,6 +353,23 @@ test("parseConfig reads string vars into numbers", () => {
 
 test("parseConfig throws on a missing or non-numeric number var", () => {
   assert.throws(() => parseConfig({ DAILY_PER_INSTALL: "x" }));
+});
+
+// A 0 (or a negative, or an empty value) would make every request "used up" with no hint at the cause: it is a
+// misconfiguration, so the Worker answers server_misconfigured and logs the variable's name.
+const LIMIT_ENV = {
+  DAILY_PER_INSTALL: "100", DAILY_PER_IP: "300", MONTHLY_CAP_USD: "10",
+  PRICE_IN_HIT: "6e-9", PRICE_IN_MISS: "3e-7", PRICE_OUT: "1.2e-6",
+};
+test("parseConfig: the daily limits must be positive; 0, negative or empty is a bad config var naming the variable", () => {
+  for (const name of ["DAILY_PER_INSTALL", "DAILY_PER_IP", "DAILY_FAILED_PER_IP"]) {
+    for (const bad of ["0", "-5", "0.5"]) {
+      assert.throws(() => parseConfig({ ...LIMIT_ENV, [name]: bad }), new RegExp(`bad config var ${name}`), `${name}=${bad}`);
+    }
+  }
+  assert.throws(() => parseConfig({ ...LIMIT_ENV, DAILY_PER_IP: "" }), /bad config var DAILY_PER_IP/);
+  assert.equal(parseConfig({ ...LIMIT_ENV, DAILY_FAILED_PER_IP: "" }).DAILY_FAILED_PER_IP, 20, "optional: empty means the default");
+  assert.equal(parseConfig({ ...LIMIT_ENV, DAILY_PER_IP: "1" }).DAILY_PER_IP, 1);
 });
 
 const estimateCost = (text) =>
@@ -440,13 +458,15 @@ test("a putCache failure still leaves the spend recorded", async () => {
   assert.ok(Math.abs((await db.getSpend(MONTH)) - COST) < 1e-12);
 });
 
-test("only the exact chrome-extension://* entry is a wildcard; other trailing * are literal", () => {
+test("no entry is a wildcard: a * is a literal character, even in chrome-extension://*", () => {
   const cfg = (ALLOWED_ORIGINS) => ({ ...CONFIG, ALLOWED_ORIGINS });
   assert.equal(originAllowed("https://foo.evil.com", cfg("https://foo*")), false);
   assert.equal(originAllowed("https://foo*", cfg("https://foo*")), true);
-  assert.equal(originAllowed("chrome-extension://abc", cfg("chrome-extension://*")), true);
+  assert.equal(originAllowed("chrome-extension://abc", cfg("chrome-extension://*")), false, "any-extension is not understood any more");
+  assert.equal(originAllowed("chrome-extension://*", cfg("chrome-extension://*")), true, "only the literal origin, which no browser sends");
   assert.equal(originAllowed("chrome-extension://abc", cfg("chrome-ext*")), false);
   assert.equal(originAllowed("chrome-extension://abc", cfg("chrome-extension://abc*")), false);
+  assert.equal(originAllowed("chrome-extension://abc", cfg("chrome-extension://abc")), true);
 });
 
 test("an LLM failure logs a short cause and nothing secret", async () => {
@@ -475,7 +495,7 @@ test("prose instead of JSON is 422 explanation_refused: spend charged, no quota,
   assert.ok(Math.abs((await db.getSpend(MONTH)) - COST) < 1e-12);
   assert.equal(db.cache.size, 0);
   assert.equal(db.installs.size, 0);
-  assert.equal(db.ips.has(`${DAY}|iphash`), false); // the normal per-IP counter; the refusal counter is tested below
+  assert.equal(db.ips.has(`${DAY}|iphash`), false); // the normal per-IP counter; the failed-call counter is tested below
 });
 
 test("finish_reason content_filter is 422 explanation_refused even with empty content", async () => {
@@ -506,12 +526,12 @@ test("a refusal is logged by kind, without the model's text", async () => {
   assert.doesNotMatch(logged, /SECRET/);
 });
 
-// ---- refusals are paid calls: a per-IP daily ceiling ----
+// ---- failed paid calls (a refusal, an unusable answer): a per-IP daily ceiling, with its own error code ----
 
 const REFUSE = async () => ({ result: "I can't help with that.", usage: USAGE, finishReason: "stop" });
 const FAILED_KEY = `${DAY}|failed:iphash`;
 
-test("a refusal counts against the IP's failed-call counter only: not the normal IP counter, not the install", async () => {
+test("a failed paid call counts against the IP's failed-call counter only: not the normal IP counter, not the install", async () => {
   const { db, ctx } = setup({ callLlm: REFUSE });
   assert.equal((await handleExplain(body(), ctx)).status, 422);
   assert.equal(db.ips.get(FAILED_KEY), 1);
@@ -520,7 +540,7 @@ test("a refusal counts against the IP's failed-call counter only: not the normal
   assert.equal(db.cache.size, 0);
 });
 
-test("the 21st refusal from one IP in a day is 429 free_daily_limit, and the LLM is not called", async () => {
+test("the 21st failed call from one IP in a day is 429 free_failed_limit (not free_daily_limit), and the LLM is not called", async () => {
   const { db, calls, ctx } = setup();
   const refusing = { ...ctx, callLlm: async (t) => (calls.push(t), REFUSE()) };
   for (let i = 0; i < 20; i++) assert.equal((await handleExplain(body(), refusing)).status, 422, `request ${i + 1}`);
@@ -528,19 +548,31 @@ test("the 21st refusal from one IP in a day is 429 free_daily_limit, and the LLM
   const spent = await db.getSpend(MONTH);
   const r = await handleExplain(body(), refusing);
   assert.equal(r.status, 429);
-  assert.deepEqual(r.json, { error: "free_daily_limit" });
+  assert.deepEqual(r.json, { error: "free_failed_limit" });
   assert.equal(calls.length, 20);
   assert.equal(await db.getSpend(MONTH), spent);
   assert.equal(db.ips.get(FAILED_KEY), 20);
 });
 
-test("the refusal ceiling is DAILY_FAILED_PER_IP", async () => {
+test("the failed-call ceiling is DAILY_FAILED_PER_IP", async () => {
   const { calls, ctx } = setup();
   const refusing = { ...ctx, config: { ...CONFIG, DAILY_FAILED_PER_IP: 2 }, callLlm: async (t) => (calls.push(t), REFUSE()) };
   assert.equal((await handleExplain(body(), refusing)).status, 422);
   assert.equal((await handleExplain(body(), refusing)).status, 422);
-  assert.equal((await handleExplain(body(), refusing)).status, 429);
+  const blocked = await handleExplain(body(), refusing);
+  assert.equal(blocked.status, 429);
+  assert.equal(blocked.json.error, "free_failed_limit");
   assert.equal(calls.length, 2);
+});
+
+test("an install or IP over its daily allowance is free_daily_limit even when the failed-call ceiling is reached too", async () => {
+  const { db, ctx } = setup();
+  db.ips.set(FAILED_KEY, 20);
+  db.installs.set(`${DAY}|${ID}`, 100);
+  assert.equal((await handleExplain(body(), ctx)).json.error, "free_daily_limit");
+  db.installs.clear();
+  db.ips.set(`${DAY}|iphash`, 300);
+  assert.equal((await handleExplain(body(), ctx)).json.error, "free_daily_limit");
 });
 
 test("a blocked IP blocks any line and any install, but another IP is unaffected", async () => {
@@ -548,21 +580,21 @@ test("a blocked IP blocks any line and any install, but another IP is unaffected
   db.ips.set(FAILED_KEY, 20);
   const r = await handleExplain(body({ install_id: ID2, text: "さようなら" }), ctx);
   assert.equal(r.status, 429);
-  assert.equal(r.json.error, "free_daily_limit");
+  assert.equal(r.json.error, "free_failed_limit");
   assert.equal(calls.length, 0);
   const other = await handleExplain(body(), { ...ctx, ipHash: "other-iphash" });
   assert.equal(other.status, 200);
   assert.equal(calls.length, 1);
 });
 
-test("the refusal counter resets on the next UTC day", async () => {
+test("the failed-call counter resets on the next UTC day", async () => {
   const { db, ctx } = setup();
   db.ips.set(FAILED_KEY, 20);
   const r = await handleExplain(body(), { ...ctx, now: new Date("2026-11-02T00:00:01Z") });
   assert.equal(r.status, 200);
 });
 
-test("successful explanations do not touch the refusal counter", async () => {
+test("successful explanations do not touch the failed-call counter", async () => {
   const { db, ctx } = setup();
   for (const text of ["いち", "に", "さん"]) assert.equal((await handleExplain(body({ text }), ctx)).status, 200);
   assert.deepEqual([...db.ips.keys()], [`${DAY}|iphash`]);
@@ -620,7 +652,7 @@ test("failed paid calls of every kind share one ceiling", async () => {
   assert.equal(db.ips.get(FAILED_KEY), 3);
 });
 
-test("a cached line is still served to an IP at its refusal ceiling", async () => {
+test("a cached line is still served to an IP at its failed-call ceiling", async () => {
   const { db, calls, ctx } = setup();
   assert.equal((await handleExplain(body(), ctx)).status, 200);
   db.ips.set(FAILED_KEY, 20);
@@ -630,7 +662,7 @@ test("a cached line is still served to an IP at its refusal ceiling", async () =
   assert.equal(calls.length, 1);
 });
 
-test("the refusal log carries neither the line nor the IP hash", async () => {
+test("the log of a refused line carries neither the line nor the IP hash", async () => {
   const { ctx } = setup({ ipHash: "iphash-secret", callLlm: REFUSE });
   await handleExplain(body({ text: "SECRET-LINE" }), ctx);
   const logged = errors.mock.calls.map((c) => c.arguments.join(" ")).join("\n");

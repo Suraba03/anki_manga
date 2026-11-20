@@ -5,7 +5,10 @@ import { alertText } from "./alerts.js";
 
 export const MAX_TEXT_CHARS = 300;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const NUMBER_VARS = ["DAILY_PER_INSTALL", "DAILY_PER_IP", "MONTHLY_CAP_USD", "PRICE_IN_HIT", "PRICE_IN_MISS", "PRICE_OUT"];
+const NUMBER_VARS = ["MONTHLY_CAP_USD", "PRICE_IN_HIT", "PRICE_IN_MISS", "PRICE_OUT"];
+// Daily limits: whole numbers of at least 1. A 0 would make every request "used up" with no hint at the cause.
+const LIMIT_VARS = ["DAILY_PER_INSTALL", "DAILY_PER_IP"];
+const isLimit = (n) => Number.isInteger(n) && n >= 1;
 const DEFAULT_FAILED_PER_IP = 20;
 const DEFAULT_DAILY_ALERT_FRACTION = 0.25; // of the monthly cap: about 7x a normal day at the cap
 // Monthly alerts: [kind, fraction of MONTHLY_CAP_USD]. Order matters: 80% is sent before 100%.
@@ -20,10 +23,15 @@ export function parseConfig(env) {
     if (env[name] === undefined || env[name] === "" || !Number.isFinite(n)) throw new Error(`bad config var ${name}`);
     config[name] = n;
   }
+  for (const name of LIMIT_VARS) {
+    const n = Number(env[name]);
+    if (env[name] === undefined || env[name] === "" || !isLimit(n)) throw new Error(`bad config var ${name}`);
+    config[name] = n;
+  }
   // DAILY_FAILED_PER_IP: paid calls that gave no explanation (a refusal, an unusable answer) per IP per day.
   // Optional; they cost money but use no other quota, so without a ceiling a script could repeat them.
   const failed = env.DAILY_FAILED_PER_IP === undefined || env.DAILY_FAILED_PER_IP === "" ? DEFAULT_FAILED_PER_IP : Number(env.DAILY_FAILED_PER_IP);
-  if (!Number.isFinite(failed)) throw new Error("bad config var DAILY_FAILED_PER_IP");
+  if (!isLimit(failed)) throw new Error("bad config var DAILY_FAILED_PER_IP");
   config.DAILY_FAILED_PER_IP = failed;
   // DAILY_ALERT_USD: one day's spend above this alerts the owner (abuse). Optional.
   const dailyAlert = env.DAILY_ALERT_USD === undefined || env.DAILY_ALERT_USD === "" ? DEFAULT_DAILY_ALERT_FRACTION * config.MONTHLY_CAP_USD : Number(env.DAILY_ALERT_USD);
@@ -39,16 +47,14 @@ export async function explanationKey(text) {
   return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-const ANY_EXTENSION = "chrome-extension://*";
-
-// origin: the Origin request header or null. Entries are exact origins (wrangler.toml lists the Web Store
-// build), except the single wildcard "chrome-extension://*" (any extension; local experiments only).
+// origin: the Origin request header or null. Entries are exact origins (wrangler.toml lists the Web Store build
+// and the owner's dev builds); no entry is a pattern, a "*" is just a character.
 export function originAllowed(origin, config) {
   if (!origin) return config.ALLOW_NO_ORIGIN === "1";
   return config.ALLOWED_ORIGINS.split(",")
     .map((s) => s.trim())
     .filter(Boolean)
-    .some((entry) => (entry === ANY_EXTENSION ? origin.startsWith("chrome-extension://") : origin === entry));
+    .some((entry) => origin === entry);
 }
 
 // A short, safe description of a caught error for the logs: names and a status, never the message
@@ -158,13 +164,12 @@ export async function handleExplain(body, { db, callLlm, now, ipHash, origin, co
   // ip_counts under their own "failed:" key, so they never eat the normal per-IP allowance (the daily cron
   // prunes them with the rest). They are not cached, so a script could otherwise repeat them for free.
   const failedKey = `failed:${ipHash}`;
-  if (
-    installUsed >= config.DAILY_PER_INSTALL ||
-    (await db.countIp(day, ipHash)) >= config.DAILY_PER_IP ||
-    (await db.countIp(day, failedKey)) >= config.DAILY_FAILED_PER_IP
-  ) {
+  // Two codes: the allowance is used up ("resets tomorrow", and the extension shows 0 left), or this network made
+  // too many calls that gave nothing (the user's own allowance may be untouched). The first wins when both hold.
+  if (installUsed >= config.DAILY_PER_INSTALL || (await db.countIp(day, ipHash)) >= config.DAILY_PER_IP) {
     return err(429, "free_daily_limit");
   }
+  if ((await db.countIp(day, failedKey)) >= config.DAILY_FAILED_PER_IP) return err(429, "free_failed_limit");
   const spentBefore = await db.getSpend(month);
   if (spentBefore >= config.MONTHLY_CAP_USD) return err(429, "free_monthly_cap");
 
