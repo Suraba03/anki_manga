@@ -39,6 +39,10 @@ jobs:
 
       - name: Extension unit tests
         working-directory: extension
+        env:
+          # onnxruntime-node downloads its CUDA binaries on Linux x64 at install; that release asset is gone (404), and
+          # the tests run on the CPU build that ships in the package.
+          ONNXRUNTIME_NODE_INSTALL_CUDA: skip
         run: |
           npm ci --no-audit --no-fund
           node --test
