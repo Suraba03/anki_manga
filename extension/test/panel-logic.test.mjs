@@ -21,6 +21,8 @@ import {
   deckForCard,
   latestCall,
   deckChanged,
+  deckStateText,
+  announceGone,
   deckTargetText,
   DEFAULT_DECK,
   NO_DECK,
@@ -33,6 +35,10 @@ test("free-tier and no_text copy is exact", () => {
   });
   assert.deepEqual(explainErrorMessage("free_monthly_cap", { now: new Date("2026-11-08T10:00:00Z") }), {
     text: "The free service has used its budget for this month; it comes back on December 1. You can add your own API key in Settings.",
+    action: "own_key",
+  });
+  assert.deepEqual(explainErrorMessage("free_failed_limit"), {
+    text: "The free service is paused for your network today after too many explanations failed — it resumes tomorrow. Add your own API key to keep going.",
     action: "own_key",
   });
   assert.deepEqual(explainErrorMessage("free_unavailable"), {
@@ -208,6 +214,7 @@ test("custom base URLs: https, or http only for localhost", () => {
 test("a free-tier limit answer sets the 'left today' count to 0", () => {
   assert.equal(freeRemainingAfterError("free_daily_limit"), 0);
   assert.equal(freeRemainingAfterError("free_monthly_cap"), 0);
+  assert.equal(freeRemainingAfterError("free_failed_limit"), null, "the user's own allowance is not used up");
   assert.equal(freeRemainingAfterError("free_unavailable"), null);
   assert.equal(freeRemainingAfterError("auth"), null);
 });
@@ -351,4 +358,38 @@ test("deck: the line by the cards names the target deck, or says to pick one", (
   assert.equal(deckTargetText("manga mining"), "Cards go to → manga mining");
   assert.equal(deckTargetText(null), NO_DECK);
   assert.equal(NO_DECK, "Pick an Anki deck in Settings first.");
+});
+
+test("deckStateText: what the deck line in Settings says for each offer, with the missing deck named only when asked", () => {
+  const use = { selected: DEFAULT_DECK, offer: "use" };
+  const create = { selected: null, offer: "create" };
+  const fine = { selected: "Core", offer: null };
+  assert.equal(deckStateText(use, null, null), "Cards will go to “manga mining” once you confirm it.");
+  assert.equal(deckStateText(use, null, "Old"), "“Old” is no longer in Anki. Cards will go to “manga mining” once you confirm it.");
+  assert.equal(deckStateText(create, null, null), "Choose a deck for your cards, or create “manga mining”.");
+  assert.equal(deckStateText(create, null, "Old"), "“Old” is no longer in Anki. Choose a deck for your cards, or create “manga mining”.");
+  assert.equal(deckStateText(fine, "Core", null), "");
+  assert.equal(deckStateText(fine, "Core", "Old"), "“Old” is no longer in Anki. Cards go to “Core”.");
+});
+
+test("announceGone: a missing deck is announced once per site, until it is fixed", () => {
+  const said = new Map();
+  assert.equal(announceGone(said, "https://a.test", null), null, "nothing missing");
+  assert.equal(announceGone(said, "https://a.test", "Old"), "Old", "first time");
+  assert.equal(announceGone(said, "https://a.test", "Old"), null, "the same one again (every tab change)");
+  assert.equal(announceGone(said, "https://b.test", "Old"), "Old", "another site has its own entry");
+  assert.equal(announceGone(said, "https://a.test", "Other"), "Other", "a different missing deck is news");
+  assert.equal(announceGone(said, "https://a.test", null), null, "fixed");
+  assert.equal(announceGone(said, "https://a.test", "Other"), "Other", "missing again after a fix: say so again");
+  assert.equal(announceGone(said, null, "Old"), "Old", "no origin (a chrome:// page) still works");
+  assert.equal(announceGone(said, null, "Old"), null);
+});
+
+test("announceGone: a note nobody could see (Settings closed) is shown but not used up", () => {
+  const said = new Map();
+  assert.equal(announceGone(said, "https://a.test", "Old", false), "Old");
+  assert.equal(announceGone(said, "https://a.test", "Old", false), "Old", "still news the next time");
+  assert.equal(announceGone(said, "https://a.test", "Old", true), "Old", "seen now");
+  assert.equal(announceGone(said, "https://a.test", "Old", false), null, "and not repeated after that");
+  assert.equal(announceGone(said, "https://a.test", null, false), null);
 });

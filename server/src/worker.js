@@ -86,6 +86,34 @@ export function makeD1Db(d1, nowMs = Date.now) {
   };
 }
 
+// What the per-IP limits count. IPv4: the address. IPv6: its /64 (the first four groups), because one subscriber
+// usually holds a whole /64 and could otherwise rotate through addresses to get past the limits (the monthly cap
+// still guards the money). An IPv4-mapped IPv6 address counts as its IPv4 address; anything unreadable is kept as it
+// is, so it still counts as one caller.
+export function ipBucket(ip) {
+  const s = typeof ip === "string" ? ip.trim() : "";
+  if (!s.includes(":") || /[^0-9a-f:.]/i.test(s)) return s;
+  let text = s.toLowerCase();
+  const dotted = text.match(/^(.*:)(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/); // a trailing IPv4 part is two groups
+  if (dotted) {
+    const octets = dotted.slice(2).map(Number);
+    if (octets.some((o) => o > 255)) return s;
+    text = `${dotted[1]}${((octets[0] << 8) | octets[1]).toString(16)}:${((octets[2] << 8) | octets[3]).toString(16)}`;
+  }
+  const halves = text.split("::");
+  if (halves.length > 2) return s;
+  const side = (h) => (h === "" ? [] : h.split(":"));
+  const head = side(halves[0]);
+  const tail = halves.length === 2 ? side(halves[1]) : [];
+  const missing = 8 - head.length - tail.length;
+  if (halves.length === 2 ? missing < 1 : missing !== 0) return s;
+  const hextets = [...head, ...Array(halves.length === 2 ? missing : 0).fill("0"), ...tail];
+  if (!hextets.every((g) => /^[0-9a-f]{1,4}$/.test(g))) return s;
+  const n = hextets.map((g) => Number.parseInt(g, 16));
+  if (n.slice(0, 5).every((g) => g === 0) && n[5] === 0xffff) return `${n[6] >> 8}.${n[6] & 255}.${n[7] >> 8}.${n[7] & 255}`;
+  return `${n.slice(0, 4).map((g) => g.toString(16)).join(":")}::/64`;
+}
+
 async function sha256Hex(s) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
   return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
@@ -124,7 +152,9 @@ export async function handle(request, env, deps = {}) {
   let config;
   try {
     config = parseConfig(env);
-  } catch {
+  } catch (e) {
+    // The message names the variable only (never a value): without this a bad var looks like a silent outage.
+    console.error("free tier: server misconfigured:", e?.message);
     return respond(500, { error: "server_misconfigured" }, null);
   }
   if (!originAllowed(origin, config)) return respond(403, { error: "forbidden_origin" }, null);
@@ -157,7 +187,7 @@ export async function handle(request, env, deps = {}) {
   }
 
   try {
-    const ipHash = await sha256Hex(env.IP_SALT + (request.headers.get("CF-Connecting-IP") ?? ""));
+    const ipHash = await sha256Hex(env.IP_SALT + ipBucket(request.headers.get("CF-Connecting-IP") ?? ""));
     const { status, json, headers } = await handleExplain(body, {
       db: deps.db ?? makeD1Db(env.DB),
       callLlm: deps.callLlm ?? ((text) => callDeepSeek(text, { apiKey: env.DEEPSEEK_API_KEY, model: env.LLM_MODEL || DEFAULT_MODEL, fetch: deps.fetch })),

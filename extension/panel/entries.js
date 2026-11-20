@@ -5,7 +5,8 @@ import { getSettings } from "../lib/settings.js";
 import { openStore } from "../engine/store.js";
 import { rubyHtml } from "../lib/text.js";
 import { cardFields } from "../lib/cards.js";
-import { explainingOn, explainErrorMessage, ankiErrorMessage, pictureFilename, freeRemainingAfterError, waitForBubbleText, cardDoneState, DICT_UNAVAILABLE, NO_DECK } from "./logic.js";
+import { explainingOn, explainErrorMessage, ankiErrorMessage, pictureFilename, freeRemainingAfterError, waitForBubbleText, DICT_UNAVAILABLE, NO_DECK } from "./logic.js";
+import { createGreyer, markDone } from "./grey.js";
 import { engine } from "./engine.js";
 import { ankiForCards, knownWords } from "./anki.js";
 import { currentDeck, openOwnKey, DECK_CHANGED } from "./settings.js";
@@ -47,14 +48,6 @@ function clearMsg(el) {
 }
 
 // --- cards ------------------------------------------------------------------------------
-function markDone(row, btn, outcome) {
-  const { label, cls } = cardDoneState(outcome);
-  row.classList.add(cls);
-  btn.textContent = label;
-  btn.disabled = true;
-  btn.dataset.done = "1";
-}
-
 // The deck's known words, loaded in the background (Anki may ask permission, or not be running); null without a deck.
 function loadKnown(ctx) {
   return currentDeck()
@@ -68,35 +61,8 @@ function loadKnown(ctx) {
     });
 }
 
-// Every "+" row that may still need greying; the deck can be chosen after the entries were rendered.
-// Rows of entries that were dropped from the panel (MAX_ENTRIES) are forgotten.
-const greyRows = new Set();
-const dropGone = () => {
-  for (const r of greyRows) if (!r.ctx.el.isConnected) greyRows.delete(r);
-};
-
-function applyKnown({ ctx, row, btn, card }) {
-  ctx.knownP.then((known) => {
-    if (known && !btn.dataset.done && known.isKnown(card.word, card.reading)) markDone(row, btn, "in_deck");
-  });
-}
-
-// Greys out a row whose word the deck already has (once the deck's known words have arrived).
-function greyIfKnown(ctx, row, btn, card) {
-  const r = { ctx, row, btn, card };
-  dropGone();
-  greyRows.add(r);
-  applyKnown(r);
-}
-
-// The deck changed (picked, confirmed, created): load its known words again and re-check the visible rows.
-function refreshKnown() {
-  dropGone();
-  const ctxs = new Set([...greyRows].map((r) => r.ctx));
-  for (const ctx of ctxs) ctx.knownP = loadKnown(ctx);
-  for (const r of greyRows) applyKnown(r);
-}
-document.addEventListener(DECK_CHANGED, refreshKnown);
+const greyer = createGreyer(loadKnown);
+document.addEventListener(DECK_CHANGED, () => greyer.refresh()); // the deck changed: re-check the visible rows
 
 async function mine(ctx, card) {
   const deck = await currentDeck();
@@ -136,7 +102,7 @@ function addButton(ctx, row, card) {
       addMsg(ctx.el, e.shown || ankiErrorMessage(e.kind || "anki_error", e.kind ? e.message : ""));
     }
   });
-  greyIfKnown(ctx, row, btn, card);
+  greyer.track(ctx, row, btn, card);
   return btn;
 }
 

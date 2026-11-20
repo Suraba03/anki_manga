@@ -12,6 +12,7 @@ function monthlyCapText(now) {
 
 const EXPLAIN_MESSAGES = {
   free_daily_limit: ["Today's free explanations are used up — they reset tomorrow. Add your own API key to keep going.", OWN_KEY],
+  free_failed_limit: ["The free service is paused for your network today after too many explanations failed — it resumes tomorrow. Add your own API key to keep going.", OWN_KEY],
   free_monthly_cap: [monthlyCapText, OWN_KEY],
   free_unavailable: ["The free explanation service is unavailable right now. Try again later or add your own API key.", OWN_KEY],
   no_text: ["No text was recognized in this bubble.", null],
@@ -115,6 +116,28 @@ export function deckChoice(names, deck) {
   if (deck && names.includes(deck)) return { selected: deck, offer: null };
   if (names.includes(DEFAULT_DECK)) return { selected: DEFAULT_DECK, offer: "use" };
   return { selected: null, offer: "create" };
+}
+
+// The line under the deck picker. gone: a saved deck Anki lacks, to name in this message (null: none, or already said).
+export function deckStateText(choice, deck, gone) {
+  const lost = gone ? `“${gone}” is no longer in Anki. ` : "";
+  if (choice.offer === "use") return `${lost}Cards will go to “${DEFAULT_DECK}” once you confirm it.`;
+  if (choice.offer === "create") return `${lost}Choose a deck for your cards, or create “${DEFAULT_DECK}”.`;
+  return lost ? `${lost}Cards go to “${deck}”.` : "";
+}
+
+// "No longer in Anki" is news once: the deck stays saved (Anki may be on another profile), so every look at Anki's list
+// would repeat it. said: Map origin -> the missing deck already announced (the panel keeps one while it is open).
+// seen: whether the user can see the line now (the Settings drawer is open); a note nobody saw is not used up.
+// -> the deck to name now | null. A fixed entry (nothing missing) is forgotten, so a later loss is announced again.
+export function announceGone(said, origin, missing, seen = true) {
+  if (!missing) {
+    said.delete(origin);
+    return null;
+  }
+  if (said.get(origin) === missing) return null;
+  if (seen) said.set(origin, missing);
+  return missing;
 }
 
 // The deck a "+" sends to. checked: {origin, deck} from the last successful look at Anki's deck list (null before

@@ -1,7 +1,7 @@
 import { test, mock, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import worker, { handle, callDeepSeek, makeD1Db } from "../src/worker.js";
+import worker, { handle, callDeepSeek, makeD1Db, ipBucket } from "../src/worker.js";
 import { parseConfig, originAllowed } from "../src/explain.js";
 import { readFileSync } from "node:fs";
 import { buildMessages } from "../../extension/lib/prompt.js";
@@ -15,7 +15,7 @@ const ENV = {
   IP_SALT: "salt",
   DAILY_PER_INSTALL: "100", DAILY_PER_IP: "300", MONTHLY_CAP_USD: "10",
   PRICE_IN_HIT: "0.000001", PRICE_IN_MISS: "0.00001", PRICE_OUT: "0.0001",
-  ALLOWED_ORIGINS: "chrome-extension://*",
+  ALLOWED_ORIGINS: ORIGIN,
   ALLOW_NO_ORIGIN: "0",
   DB: {},
 };
@@ -315,7 +315,7 @@ function ipCountsD1() {
   };
 }
 
-test("refusals are kept in ip_counts under a failed: key: the 21st from one IP is 429 without a paid call", async () => {
+test("failed paid calls are kept in ip_counts under a failed: key: the 21st from one IP is 429 free_failed_limit without a paid call", async () => {
   const d1 = ipCountsD1();
   let paidCalls = 0;
   const llm = async () => (paidCalls++, { result: "I can't help with that.", usage: {}, finishReason: "stop" });
@@ -324,7 +324,7 @@ test("refusals are kept in ip_counts under a failed: key: the 21st from one IP i
   for (let i = 0; i < 20; i++) assert.equal((await handle(req(), env, { callLlm: llm, now })).status, 422);
   const blocked = await handle(req(), env, { callLlm: llm, now });
   assert.equal(blocked.status, 429);
-  assert.deepEqual(await blocked.json(), { error: "free_daily_limit" });
+  assert.deepEqual(await blocked.json(), { error: "free_failed_limit" });
   assert.equal(paidCalls, 20);
 
   const hash = createHash("sha256").update("salt203.0.113.9").digest("hex");
@@ -333,6 +333,53 @@ test("refusals are kept in ip_counts under a failed: key: the 21st from one IP i
 
   const other = await handle(req({ headers: { "CF-Connecting-IP": "198.51.100.1" } }), env, { callLlm: llm, now });
   assert.equal(other.status, 422);
+});
+
+test("a bad limit var is a 500 server_misconfigured that logs the variable's name, not a silent 'used up'", async () => {
+  const r = await handle(req(), { ...ENV, DAILY_PER_IP: "0" }, deps());
+  assert.equal(r.status, 500);
+  assert.deepEqual(await r.json(), { error: "server_misconfigured" });
+  const logged = errors.mock.calls.map((c) => c.arguments.join(" ")).join("\n");
+  assert.match(logged, /bad config var DAILY_PER_IP/);
+});
+
+// ---- IPv6: the limits count a /64, the smallest block one subscriber usually holds ----
+test("ipBucket: IPv4 is unchanged; IPv6 keeps its first 64 bits, however it is written", () => {
+  assert.equal(ipBucket("203.0.113.9"), "203.0.113.9");
+  assert.equal(ipBucket("2001:db8:1:2:aaaa:bbbb:cccc:dddd"), "2001:db8:1:2::/64");
+  assert.equal(ipBucket("2001:0DB8:0001:0002:0000:0000:0000:0001"), "2001:db8:1:2::/64", "case and leading zeros");
+  assert.equal(ipBucket("2001:db8:1:2::1"), "2001:db8:1:2::/64", "compressed tail");
+  assert.equal(ipBucket("2001:db8::1"), "2001:db8:0:0::/64", "compression inside the first 64 bits");
+  assert.equal(ipBucket("::1"), "0:0:0:0::/64");
+  assert.equal(ipBucket("::"), "0:0:0:0::/64");
+  assert.equal(ipBucket("2001:db8:1:2::"), "2001:db8:1:2::/64");
+  assert.equal(ipBucket("2001:db8:1:2:3:4:5:6"), ipBucket("2001:db8:1:2:ffff:ffff:ffff:ffff"));
+  assert.notEqual(ipBucket("2001:db8:1:2::1"), ipBucket("2001:db8:1:3::1"), "another /64 is another bucket");
+});
+
+test("ipBucket: an IPv4-mapped address is its IPv4 address; anything unreadable passes through", () => {
+  assert.equal(ipBucket("::ffff:203.0.113.9"), "203.0.113.9");
+  assert.equal(ipBucket("::FFFF:203.0.113.9"), "203.0.113.9");
+  assert.equal(ipBucket("::ffff:cb00:7109"), "203.0.113.9", "hex form of the same");
+  assert.equal(ipBucket("2001:db8::1%eth0"), "2001:db8::1%eth0");
+  assert.equal(ipBucket("not an ip"), "not an ip");
+  assert.equal(ipBucket("1:2:3:4:5:6:7:8:9"), "1:2:3:4:5:6:7:8:9");
+  assert.equal(ipBucket("1::2::3"), "1::2::3");
+  assert.equal(ipBucket(""), "");
+  assert.equal(ipBucket(null), "");
+});
+
+test("two addresses in one IPv6 /64 share the per-IP counter; another /64 has its own", async () => {
+  const d = deps();
+  const env = { ...ENV };
+  const from = (ip, text) => req({ headers: { "CF-Connecting-IP": ip } }, { install_id: ID, text, prompt_version: 1 });
+  assert.equal((await handle(from("2001:db8:1:2::1", "いち"), env, d)).status, 200);
+  assert.equal((await handle(from("2001:db8:1:2:dead:beef:0:7", "に"), env, d)).status, 200);
+  assert.equal((await handle(from("2001:db8:1:3::1", "さん"), env, d)).status, 200);
+  const ipRows = [...d.db.counts].filter(([k]) => k.startsWith("p|"));
+  assert.deepEqual(ipRows.map(([, n]) => n).sort(), [1, 2]);
+  const hash = createHash("sha256").update("salt2001:db8:1:2::/64").digest("hex");
+  assert.equal(d.db.counts.get(`p|2026-11-01|${hash}`), 2, "the bucket, not the address, is salted and hashed");
 });
 
 test("wrangler.toml sets DAILY_FAILED_PER_IP next to the other limits", () => {

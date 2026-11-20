@@ -22,6 +22,7 @@ Reference site: a scroll-style reader that you enabled (not named in the repo).
 - [ ] 7. Click the same bubble again: it answers instantly (cached) and the count does not drop.
 - [ ] 8. Free server unavailable (offline, or before it is deployed): `The free explanation service is unavailable right now. Try again later or add your own API key.` plus an "Add your own API key" button that opens Settings with the own-key form.
 - [ ] 9. Daily limit used up: `Today's free explanations are used up — they reset tomorrow. Add your own API key to keep going.` Monthly cap: `The free service has used its budget for this month; it comes back on <1st of next month, UTC, e.g. December 1>. You can add your own API key in Settings.`
+- [ ] 9a. Failed-call ceiling (20 paid calls from one network that gave no explanation, in one UTC day): `The free service is paused for your network today after too many explanations failed — it resumes tomorrow. Add your own API key to keep going.` The "left today" count is not set to 0.
 - [ ] 10. A bubble with no recognized text shows `No text was recognized in this bubble.`
 
 ## Own key

@@ -6,11 +6,14 @@ compatibility_date = "2026-10-01"
 DAILY_PER_INSTALL = "100"
 DAILY_PER_IP = "300"
 # Paid calls that gave no explanation (the model declined, or its answer was unusable) cost money but use no other
-# quota, so they have their own per-IP daily ceiling.
+# quota, so they have their own per-IP daily ceiling (429 free_failed_limit). The limits are whole numbers >= 1: a
+# 0 or an empty value makes the Worker answer 500 server_misconfigured and log which variable is wrong. IPv6 callers
+# are counted per /64.
 DAILY_FAILED_PER_IP = "20"
-MONTHLY_CAP_USD = "10"
+MONTHLY_CAP_USD = "50"
 # One UTC day's spend above this (USD) alerts the owner once (abuse or a bug). Optional: without it, a quarter of the
-# monthly cap. 2.5 is about 7x a normal day at the cap.
+# monthly cap. Kept at 2.5 when the cap went from 10 to 50 USD (a day at the cap is about 1.7), so it also fires on real
+# growth, not only on abuse.
 DAILY_ALERT_USD = "2.5"
 # USD per token, DeepSeek Flash at PEAK rates (the dearer ones, so the cap errs on the safe side).
 # Source: https://api-docs.deepseek.com/quick_start/pricing (checked 2026-11-01), per 1M tokens:
@@ -25,7 +28,7 @@ LLM_MODEL = "deepseek-flash"
 # Comma-separated exact origins. First the Chrome Web Store build; then, TEMPORARILY, the owner's two unpacked
 # development builds (one per checkout folder), to be removed later. An unpacked build's ID comes from its folder's
 # absolute path (SHA-256, first 32 hex digits mapped 0-f to a-p), so it changes when the folder moves.
-# "chrome-extension://*" (any extension) is still understood by originAllowed but must not ship.
+# Entries are matched exactly: no wildcards.
 ALLOWED_ORIGINS = "chrome-extension://bgfnpifeeclmpfdcahphaiahgafjppeo,chrome-extension://aimemjiaackefknhadaljaoneahoaefd,chrome-extension://mbcjdgjmpgkoiccnblkhkfjpdaclgihm"
 # "1" lets requests without an Origin header through (curl). Keep "0" in production;
 # the local smoke test sets it with: wrangler dev --var ALLOW_NO_ORIGIN:1
