@@ -7,6 +7,10 @@ const DEFAULT_MODEL = "deepseek-flash";
 const FREE_MAX_CHARS = 300;
 const DEFAULT_TIMEOUT_MS = 30000; // as v1
 
+// The server's 429 answers (server/src/explain.js): the user's daily allowance is used up, this network made too many
+// calls that gave nothing, the monthly budget is spent.
+const FREE_LIMITS = ["free_daily_limit", "free_failed_limit", "free_monthly_cap"];
+
 const inFlight = new Map(); // cache key -> Promise of the result, so one text is never requested twice at once
 
 const fail = (error) => ({ ok: false, error });
@@ -30,10 +34,9 @@ async function callFree(text, { settings, fetch, freeUrl, signal }) {
   } catch (e) {
     throw new ExplainError("free_unavailable", netDetail(e, signal));
   }
-  if (resp.status === 429 && (body?.error === "free_daily_limit" || body?.error === "free_monthly_cap")) {
-    throw new ExplainError(body.error);
-  }
-  // The server's word for a line the model declined: no quota was used (server/src/explain.js).
+  if (resp.status === 429 && FREE_LIMITS.includes(body?.error)) throw new ExplainError(body.error);
+  // The server's word for a line the model declined: it does not use the user's daily allowance (it counts toward
+  // the network's failed-call ceiling instead, server/src/explain.js).
   if (resp.status === 422 && body?.error === "explanation_refused") throw new ExplainError("refused");
   if (!resp.ok) throw new ExplainError("free_unavailable", `HTTP ${resp.status} ${clip(body?.error)}`.trim());
   let result;
@@ -81,14 +84,21 @@ async function callOwn(text, { settings, fetch, signal }) {
   let content;
   let finishReason;
   try {
-    const choice = (await resp.json()).choices[0];
-    content = choice.message.content;
+    const choice = (await resp.json())?.choices?.[0];
+    if (!choice) throw new Error("no choice");
+    content = choice.message?.content;
     finishReason = choice.finish_reason ?? null;
   } catch (e) {
     throw new ExplainError(signal?.aborted ? "network" : "bad_response", signal?.aborted ? "timeout" : "unexpected payload");
   }
-  if (isRefusal(content, finishReason)) throw new ExplainError("refused", `finish_reason=${finishReason ?? "?"}`);
-  return { result: parseExplanation(content), remaining: null };
+  // A usable explanation wins, whatever the stop reason (the free server does the same); only an answer that cannot
+  // be read is checked for a refusal.
+  try {
+    return { result: parseExplanation(content), remaining: null };
+  } catch (e) {
+    if (isRefusal(content, finishReason)) throw new ExplainError("refused", `finish_reason=${finishReason ?? "?"}`);
+    throw e;
+  }
 }
 
 async function attempt(text, key, { settings, store, fetch, freeUrl, timeoutMs, onError }) {

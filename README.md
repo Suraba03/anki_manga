@@ -216,6 +216,7 @@ Leave the other fields empty. The panel fills them when you add from there. Beca
 | **Anki isn't running…** | Open Anki. Explanations still work, but cards can't be added until Anki is open. |
 | **Anki refused this extension…** | Accept the AnkiConnect permission prompt in Anki, or add the extension's origin to `webCorsOriginList` in AnkiConnect's config and restart Anki. |
 | **Today's free explanations are used up…** | They reset tomorrow (UTC). Or add your own API key in Settings. |
+| **The free service is paused for your network today…** | Many explanations from your network failed (the model declined the lines or gave unusable answers), so the free service waits until tomorrow (UTC). Lines you already explained still work. Or add your own API key in Settings. |
 | **The free explanation service is unavailable…** | Try again later or add your own API key. |
 | **Add your DeepSeek API key in Settings…** | Settings → paste key → Save. |
 | **DeepSeek rejected the API key** | Check the key on platform.deepseek.com, or create a new one. |

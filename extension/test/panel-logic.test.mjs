@@ -35,6 +35,10 @@ test("free-tier and no_text copy is exact", () => {
     text: "The free service has used its budget for this month; it comes back on December 1. You can add your own API key in Settings.",
     action: "own_key",
   });
+  assert.deepEqual(explainErrorMessage("free_failed_limit"), {
+    text: "The free service is paused for your network today after too many explanations failed — it resumes tomorrow. Add your own API key to keep going.",
+    action: "own_key",
+  });
   assert.deepEqual(explainErrorMessage("free_unavailable"), {
     text: "The free explanation service is unavailable right now. Try again later or add your own API key.",
     action: "own_key",
@@ -208,6 +212,7 @@ test("custom base URLs: https, or http only for localhost", () => {
 test("a free-tier limit answer sets the 'left today' count to 0", () => {
   assert.equal(freeRemainingAfterError("free_daily_limit"), 0);
   assert.equal(freeRemainingAfterError("free_monthly_cap"), 0);
+  assert.equal(freeRemainingAfterError("free_failed_limit"), null, "the user's own allowance is not used up");
   assert.equal(freeRemainingAfterError("free_unavailable"), null);
   assert.equal(freeRemainingAfterError("auth"), null);
 });

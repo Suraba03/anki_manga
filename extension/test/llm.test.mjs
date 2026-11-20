@@ -247,8 +247,8 @@ test("free mode runs the result through parseExplanation", async () => {
   assert.deepEqual(out.result.suggestions, []);
 });
 
-test("free mode: 429 daily limit and monthly cap map to their codes, nothing cached", async () => {
-  for (const error of ["free_daily_limit", "free_monthly_cap"]) {
+test("free mode: 429 daily limit, failed-call ceiling and monthly cap map to their codes, nothing cached", async () => {
+  for (const error of ["free_daily_limit", "free_failed_limit", "free_monthly_cap"]) {
     const f = fakeFetch(() => jsonResponse(429, { error }));
     const store = fakeStore();
     assert.deepEqual(await run(TEXT, free(), f, store), { ok: false, error });
@@ -463,6 +463,21 @@ test("own key: a declined line is refused, with the reason in the detail, and no
     assert.deepEqual(r, { ok: false, error: "refused" });
     assert.equal(store.data.size, 0);
     assert.match(log[0], /^refused: finish_reason=/);
+  }
+});
+
+test("own key: a content_filter stop with a valid explanation keeps it (as the free server does), and caches it", async () => {
+  const store = fakeStore();
+  const r = await run("x", own(), fakeFetch(() => jsonResponse(200, chatAnswer(JSON.stringify(GOOD), "content_filter"))), store);
+  assert.equal(r.ok, true);
+  assert.equal(r.result.translation, GOOD.translation);
+  assert.equal(store.data.size, 1);
+});
+
+test("own key: a content_filter stop with no message at all is refused; a payload without any choice is bad_response", async () => {
+  assert.deepEqual(await run("x", own(), fakeFetch(() => jsonResponse(200, { choices: [{ finish_reason: "content_filter" }] }))), { ok: false, error: "refused" });
+  for (const payload of [{}, { choices: [] }, { choices: [null] }, { choices: [{}] }, { choices: [{ message: {}, finish_reason: "stop" }] }]) {
+    assert.deepEqual(await run("x", own(), fakeFetch(() => jsonResponse(200, payload))), { ok: false, error: "bad_response" }, JSON.stringify(payload));
   }
 });
 

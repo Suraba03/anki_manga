@@ -12,6 +12,7 @@ function monthlyCapText(now) {
 
 const EXPLAIN_MESSAGES = {
   free_daily_limit: ["Today's free explanations are used up — they reset tomorrow. Add your own API key to keep going.", OWN_KEY],
+  free_failed_limit: ["The free service is paused for your network today after too many explanations failed — it resumes tomorrow. Add your own API key to keep going.", OWN_KEY],
   free_monthly_cap: [monthlyCapText, OWN_KEY],
   free_unavailable: ["The free explanation service is unavailable right now. Try again later or add your own API key.", OWN_KEY],
   no_text: ["No text was recognized in this bubble.", null],
